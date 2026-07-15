@@ -6,6 +6,10 @@ var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token t
 var PHOTO_FOLDER_ID = '17cTg5MESNSdgb_ZWt_e3Lm2t3bqDShQq';
 var PHOTO_FOLDER_FALLBACK = 'CPA IT Ticket Photos';
 
+// Native Google Sheet holding the cart rosters (HS_Cart_1..6, HS_Spares, ...).
+// Roster tabs are auto-detected: serials in column B, with "Serial #" in B2.
+var ROSTER_SHEET_ID = '1FDVE6KtAEf06_zRYQyHyaNZ_9gXsv3JRJGbIwckv4Mw';
+
 // Full column layout. A = Chromebook S/N. Status=9, Notes=10 (unchanged); new cols appended.
 var HEADERS = [
   'Chromebook S/N', 'Timestamp', 'Teacher Email', 'Teacher Name', 'Room #',
@@ -18,7 +22,7 @@ var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov',
 function doGet(e) {
   var p = (e && e.parameter) || {};
   var out;
-  var guarded = ['list', 'update', 'archiveTest', 'stats'];
+  var guarded = ['list', 'update', 'archiveTest', 'stats', 'lookup'];
   if (guarded.indexOf(p.action) >= 0 && p.token !== ADMIN_TOKEN) {
     out = { ok: false, error: 'unauthorized' };
   } else if (p.action === 'list') {
@@ -27,6 +31,8 @@ function doGet(e) {
     out = updateTicket_(p);
   } else if (p.action === 'stats') {
     out = stats_();
+  } else if (p.action === 'lookup') {
+    out = deviceLookup_(p);
   } else if (p.action === 'archiveTest') {
     out = archiveCopy_(false);
   } else if (p.action === 'openCount') {
@@ -154,6 +160,59 @@ function stats_() {
     ok: true, byDevice: top(byDevice), byStudent: top(byStudent),
     avgResolutionDays: resCount ? (resSum / resCount) : null, resolvedCount: resCount
   };
+}
+
+// ---- Device history lookup ----
+// Given a serial: where it lives (cart/teacher/room/Chromebook #/student) + every
+// past ticket for it (live sheet + all archive tabs). Uses createTextFinder so the
+// search happens in one optimized pass per workbook rather than tab-by-tab.
+function deviceLookup_(p) {
+  var sn = String(p.sn || '').trim();
+  if (!sn) return { ok: false, error: 'No serial provided.' };
+  var out = { ok: true, sn: sn, assignments: [], tickets: [] };
+
+  // 1) Roster assignment — serials live in column B of tabs whose B2 says "Serial #".
+  try {
+    var rs = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+    rs.createTextFinder(sn).matchEntireCell(true).findAll().forEach(function (rng) {
+      if (rng.getColumn() !== 2) return;                 // ignore non-serial columns
+      var sh = rng.getSheet();
+      var hdr = String(sh.getRange(2, 2).getValue() || '').toLowerCase();
+      if (hdr.indexOf('serial') < 0) return;             // not a roster tab
+      var row = rng.getRow();
+      if (row < 3) return;
+      out.assignments.push({
+        cart: sh.getName(),
+        teacher: String(sh.getRange(1, 1).getValue() || ''),
+        room: String(sh.getRange(1, 2).getValue() || ''),
+        chromebookNo: String(sh.getRange(row, 1).getValue() || ''),
+        student: String(sh.getRange(row, 3).getValue() || '')
+      });
+    });
+  } catch (e) { out.rosterError = String(e); }
+
+  // 2) Ticket history — S/N is column A in the live sheet and every archive tab.
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    ss.createTextFinder(sn).matchEntireCell(true).findAll().forEach(function (rng) {
+      if (rng.getColumn() !== 1) return;
+      var sh = rng.getSheet();
+      var row = rng.getRow();
+      if (row < 2) return;
+      var r = sh.getRange(row, 1, 1, Math.max(HEADERS.length, sh.getLastColumn())).getValues()[0];
+      out.tickets.push({
+        sheet: sh.getName(),
+        ticketNo: r[10] || '',
+        timestamp: r[1] ? new Date(r[1]).toISOString() : '',
+        issue: r[5] || '', urgency: r[6] || '', status: r[8] || 'New',
+        notes: r[9] || '', studentAtFault: r[11] || '',
+        description: r[7] || '', photoUrl: r[14] || ''
+      });
+    });
+    out.tickets.sort(function (a, b) { return String(b.timestamp).localeCompare(String(a.timestamp)); });
+  } catch (e) { out.ticketError = String(e); }
+
+  return out;
 }
 
 // ---- Photos ----
