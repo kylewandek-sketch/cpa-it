@@ -173,6 +173,10 @@
         <label for="fld_desc">Describe the problem <span class="req">*</span></label>
         <textarea id="fld_desc" name="description" required placeholder="What's happening? When did it start? Anything you already tried?"></textarea>
 
+        <label for="fld_photo">Photo <span class="muted" style="font-weight:400">(optional — a picture of the damage)</span></label>
+        <input type="file" id="fld_photo" accept="image/*" capture="environment">
+        <div id="photoinfo" class="field" style="margin-top:6px"></div>
+
         <div style="margin-top:16px">
           <button type="submit" id="submitbtn" class="primary big">Submit ticket</button>
         </div>
@@ -10442,9 +10446,13 @@ form.addEventListener('submit', function (e) {
     page: location.href
   };
   submitbtn.disabled = true;
-  formmsg.textContent = 'Checking for existing ticket…'; formmsg.className = 'status';
-  // Duplicate warning: is there already an OPEN ticket for this S/N?
-  jsonp({ action: 'openCount', sn: payload.sn }).then(function (res) {
+  formmsg.textContent = 'Preparing…'; formmsg.className = 'status';
+  // 1) compress any photo, 2) warn on an existing open ticket, 3) submit
+  readPhoto(document.getElementById('fld_photo').files[0]).then(function (dataUrl) {
+    payload.photo = dataUrl || '';
+    formmsg.textContent = 'Checking for existing ticket…';
+    return jsonp({ action: 'openCount', sn: payload.sn });
+  }).then(function (res) {
     if (res && res.ok && res.count > 0) {
       if (!confirm('There is already an open ticket for this Chromebook (S/N ' + payload.sn +
                    '). Submit another anyway?')) {
@@ -10452,8 +10460,39 @@ form.addEventListener('submit', function (e) {
       }
     }
     postTicket(payload);
-  }).catch(function () { postTicket(payload); });   // if the check fails, don't block submission
+  }).catch(function () { postTicket(payload); });   // if a check fails, don't block submission
 });
+
+// Downscale + compress the chosen photo to keep the upload small and fast.
+function readPhoto(file) {
+  return new Promise(function (resolve) {
+    if (!file) return resolve('');
+    var reader = new FileReader();
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var max = 1200;
+        var scale = Math.min(1, max / Math.max(img.width, img.height));
+        var c = document.createElement('canvas');
+        c.width = Math.round(img.width * scale);
+        c.height = Math.round(img.height * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        try { resolve(c.toDataURL('image/jpeg', 0.7)); } catch (e) { resolve(''); }
+      };
+      img.onerror = function () { resolve(''); };
+      img.src = reader.result;
+    };
+    reader.onerror = function () { resolve(''); };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Show the picked photo's name/size
+document.getElementById('fld_photo').onchange = function () {
+  var f = this.files && this.files[0];
+  document.getElementById('photoinfo').textContent =
+    f ? ('Attached: ' + f.name + ' (' + Math.round(f.size / 1024) + ' KB — will be compressed)') : '';
+};
 
 function postTicket(payload) {
   formmsg.textContent = 'Submitting…'; formmsg.className = 'status';

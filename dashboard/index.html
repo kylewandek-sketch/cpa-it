@@ -188,6 +188,7 @@ var COLS = [
   { k: 'assignedTo', label: 'Assigned' },
   { k: 'studentAtFault', label: 'Student at fault' },
   { k: 'notes', label: 'Notes' },
+  { k: 'photoUrl', label: 'Photo' },
   { k: 'description', label: 'Description' }
 ];
 
@@ -381,6 +382,7 @@ function render() {
       '<td><input class="edit" data-field="assignedTo" data-row="' + t.row + '" value="' + esc(t.assignedTo) + '" placeholder="—"></td>' +
       '<td><input class="edit" data-field="studentAtFault" data-row="' + t.row + '" value="' + esc(t.studentAtFault) + '" placeholder="—"></td>' +
       '<td><input class="notes" data-row="' + t.row + '" value="' + esc(t.notes) + '" placeholder="Add note…"></td>' +
+      '<td>' + (t.photoUrl ? '<a href="' + esc(t.photoUrl) + '" target="_blank" rel="noopener" title="Open photo">📷</a>' : '') + '</td>' +
       '<td class="desc" title="' + esc(t.description) + '">' + descShort + '</td>' +
       '</tr>';
   }).join('');

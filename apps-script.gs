@@ -1,11 +1,16 @@
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
 
+// Drive folder that ticket photos are saved into. The account running this script
+// must have EDIT access to it. Falls back to a folder on the script's own Drive.
+var PHOTO_FOLDER_ID = '17cTg5MESNSdgb_ZWt_e3Lm2t3bqDShQq';
+var PHOTO_FOLDER_FALLBACK = 'CPA IT Ticket Photos';
+
 // Full column layout. A = Chromebook S/N. Status=9, Notes=10 (unchanged); new cols appended.
 var HEADERS = [
   'Chromebook S/N', 'Timestamp', 'Teacher Email', 'Teacher Name', 'Room #',
   'Issue Type', 'Urgency', 'Description', 'Status', 'Notes',
-  'Ticket #', 'Student at Fault', 'Assigned To', 'Resolved At'
+  'Ticket #', 'Student at Fault', 'Assigned To', 'Resolved At', 'Photo'
 ];
 var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -62,7 +67,8 @@ function listTickets_() {
       issue: r[5], urgency: r[6], description: r[7],
       status: r[8] || 'New', notes: r[9] || '',
       ticketNo: r[10] || '', studentAtFault: r[11] || '', assignedTo: r[12] || '',
-      resolvedAt: r[13] ? new Date(r[13]).toISOString() : ''
+      resolvedAt: r[13] ? new Date(r[13]).toISOString() : '',
+      photoUrl: r[14] || ''
     };
   });
   return { ok: true, rows: rows };
@@ -150,6 +156,28 @@ function stats_() {
   };
 }
 
+// ---- Photos ----
+// Saves a base64 data-URL photo into the Drive folder and returns its shareable URL.
+function savePhoto_(dataUrl, name) {
+  if (!dataUrl || String(dataUrl).indexOf('data:') !== 0) return '';
+  var m = String(dataUrl).match(/^data:([^;]+);base64,(.*)$/);
+  if (!m) return '';
+  var blob = Utilities.newBlob(Utilities.base64Decode(m[2]), m[1], name || 'photo.jpg');
+  var file = photoFolder_().createFile(blob);
+  try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (e) {}
+  return file.getUrl();
+}
+
+function photoFolder_() {
+  try {
+    return DriveApp.getFolderById(PHOTO_FOLDER_ID);   // the folder you provided
+  } catch (e) {
+    // No access to that folder — fall back so photos are never lost.
+    var it = DriveApp.getFoldersByName(PHOTO_FOLDER_FALLBACK);
+    return it.hasNext() ? it.next() : DriveApp.createFolder(PHOTO_FOLDER_FALLBACK);
+  }
+}
+
 // ---- Monthly archive ----
 function setupMonthlyArchive() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -192,21 +220,26 @@ function doPost(e) {
     var no = (parseInt(props.getProperty('lastTicketNo'), 10) || 1000) + 1;
     props.setProperty('lastTicketNo', String(no));
 
+    var photoUrl = '';
+    try {
+      photoUrl = savePhoto_(data.photo, 'CB_' + (data.sn || 'unknown') + '_ticket' + no + '.jpg');
+    } catch (e) { photoUrl = ''; }   // never fail a ticket because of a photo
+
     var now = new Date();
     sheet.appendRow([
       data.sn || '', now, data.email || '', data.name || '', data.room || '',
       data.issue || '', data.urgency || '', data.description || '', 'New', '',
-      no, data.studentAtFault || '', '', ''
+      no, data.studentAtFault || '', '', '', photoUrl
     ]);
 
-    sendEmail_(data, now, no);
+    sendEmail_(data, now, no, photoUrl);
     return jsonOut_({ ok: true, ticketNo: no });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err) });
   }
 }
 
-function sendEmail_(data, now, no) {
+function sendEmail_(data, now, no, photoUrl) {
   var subject = '[Help Desk] Ticket #' + no + ' — ' + (data.issue || 'Ticket') +
                 ' — CB ' + (data.sn || '?') + ' (' + (data.urgency || 'Medium') + ')';
   var lines = [
@@ -221,8 +254,10 @@ function sendEmail_(data, now, no) {
     'Submitted by:    ' + (data.name || '(no name)'),
     'Teacher email:   ' + (data.email || '(none)'),
     'Room #:          ' + (data.room || ''),
-    'Submitted at:    ' + now, '', HELPDESK_EMAIL
+    'Submitted at:    ' + now
   ];
+  if (photoUrl) lines.push('', 'Photo: ' + photoUrl);
+  lines.push('', HELPDESK_EMAIL);
   var valid = data.email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email);
   var recipient = valid ? data.email : HELPDESK_EMAIL;
   MailApp.sendEmail(recipient, subject, lines.join('\n'),
