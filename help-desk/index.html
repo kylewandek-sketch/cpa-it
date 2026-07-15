@@ -167,6 +167,9 @@
           </div>
         </div>
 
+        <label for="fld_student">Student at fault <span class="muted" style="font-weight:400">(if a student caused the damage)</span></label>
+        <input type="text" id="fld_student" name="studentAtFault" placeholder="Student name — leave blank if not applicable">
+
         <label for="fld_desc">Describe the problem <span class="req">*</span></label>
         <textarea id="fld_desc" name="description" required placeholder="What's happening? When did it start? Anything you already tried?"></textarea>
 
@@ -10434,10 +10437,25 @@ form.addEventListener('submit', function (e) {
     email: document.getElementById('fld_email').value.trim(),
     issue: document.getElementById('fld_issue').value,
     urgency: document.getElementById('fld_urgency').value,
+    studentAtFault: document.getElementById('fld_student').value.trim(),
     description: document.getElementById('fld_desc').value.trim(),
     page: location.href
   };
   submitbtn.disabled = true;
+  formmsg.textContent = 'Checking for existing ticket…'; formmsg.className = 'status';
+  // Duplicate warning: is there already an OPEN ticket for this S/N?
+  jsonp({ action: 'openCount', sn: payload.sn }).then(function (res) {
+    if (res && res.ok && res.count > 0) {
+      if (!confirm('There is already an open ticket for this Chromebook (S/N ' + payload.sn +
+                   '). Submit another anyway?')) {
+        submitbtn.disabled = false; formmsg.textContent = ''; return;
+      }
+    }
+    postTicket(payload);
+  }).catch(function () { postTicket(payload); });   // if the check fails, don't block submission
+});
+
+function postTicket(payload) {
   formmsg.textContent = 'Submitting…'; formmsg.className = 'status';
   fetch(TICKET_ENDPOINT, {
     method: 'POST',
@@ -10451,7 +10469,22 @@ form.addEventListener('submit', function (e) {
     formmsg.textContent = 'Could not submit: ' + err.message + '. Check your connection and try again.';
     formmsg.className = 'status err';
   });
-});
+}
+
+// JSONP (read-only calls to the Apps Script; avoids CORS)
+function jsonp(params) {
+  return new Promise(function (resolve, reject) {
+    var cb = 'cb_' + Math.random().toString(36).slice(2);
+    var s = document.createElement('script');
+    var timer = setTimeout(function () { cleanup(); reject(new Error('timeout')); }, 12000);
+    function cleanup() { clearTimeout(timer); delete window[cb]; if (s.parentNode) s.parentNode.removeChild(s); }
+    window[cb] = function (d) { cleanup(); resolve(d); };
+    s.onerror = function () { cleanup(); reject(new Error('network')); };
+    var qs = Object.keys(params).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); }).join('&');
+    s.src = TICKET_ENDPOINT + '?' + qs + '&callback=' + cb;
+    document.head.appendChild(s);
+  });
+}
 
 function showDone(p) {
   var card = form;

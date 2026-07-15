@@ -61,8 +61,10 @@
   .u-Medium { background:rgba(196,125,0,.16); color:var(--amber); }
   .u-Low { background:rgba(107,114,128,.16); color:var(--gray); }
   select.status { padding:5px 8px; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:12.5px; }
-  input.notes { width:100%; min-width:120px; padding:5px 7px; border-radius:7px; border:1px solid var(--line);
+  input.notes, input.edit { width:100%; min-width:90px; padding:5px 7px; border-radius:7px; border:1px solid var(--line);
                 background:var(--card); color:var(--ink); font-size:12.5px; }
+  td.age-red { color:var(--red); font-weight:700; }
+  td.age-amber { color:var(--amber); font-weight:700; }
   .desc { max-width:260px; color:var(--muted); }
   .desc .more { color:var(--blue); cursor:pointer; }
   td.actions button { background:none; border:none; color:var(--red); cursor:pointer; font-size:16px; }
@@ -174,16 +176,31 @@ var sortKey = 'urgency', sortDir = -1;   // default: urgency High→Low
 var URANK = { High: 3, Medium: 2, Low: 1, '': 0 };
 
 var COLS = [
+  { k: 'ticketNo', label: '#' },
   { k: 'urgency', label: 'Urgency' },
   { k: 'sn', label: 'S/N' },
   { k: 'issue', label: 'Issue' },
+  { k: 'age', label: 'Age' },
   { k: 'teacherEmail', label: 'Teacher' },
   { k: 'room', label: 'Room' },
   { k: 'timestamp', label: 'Submitted' },
   { k: 'status', label: 'Status' },
+  { k: 'assignedTo', label: 'Assigned' },
+  { k: 'studentAtFault', label: 'Student at fault' },
   { k: 'notes', label: 'Notes' },
   { k: 'description', label: 'Description' }
 ];
+
+function ageDays(t) {
+  if (!t.timestamp) return 0;
+  var end = (t.status === 'Resolved' && t.resolvedAt) ? new Date(t.resolvedAt) : new Date();
+  return Math.floor((end - new Date(t.timestamp)) / 86400000);
+}
+function ageInfo(t) {
+  var d = ageDays(t);
+  if (t.status === 'Resolved') return { cls: 'muted', text: (d >= 0 ? d + 'd' : '') };
+  return { cls: d >= 7 ? 'age-red' : (d >= 3 ? 'age-amber' : 'muted'), text: d + 'd' };
+}
 
 // ---- JSONP (avoids CORS with Apps Script) ----
 function jsonp(params) {
@@ -259,6 +276,7 @@ function load(fromGate, opts) {
     }
     localStorage.setItem(TOKEN_KEY, token);
     tickets = res.rows || [];
+    statsData = null;   // invalidate lifetime stats so Reports refetches fresh
     showApp(true);
     render();
     startAuto();   // (re)start the 15-min clock from the latest load
@@ -289,6 +307,8 @@ function currentView() {
     var av, bv;
     if (sortKey === 'urgency') { av = URANK[a.urgency] || 0; bv = URANK[b.urgency] || 0; }
     else if (sortKey === 'timestamp') { av = a.timestamp || ''; bv = b.timestamp || ''; }
+    else if (sortKey === 'age') { av = ageDays(a); bv = ageDays(b); }
+    else if (sortKey === 'ticketNo') { av = Number(a.ticketNo) || 0; bv = Number(b.ticketNo) || 0; }
     else { av = String(a[sortKey] || '').toLowerCase(); bv = String(b[sortKey] || '').toLowerCase(); }
     if (av < bv) return -1 * sortDir;
     if (av > bv) return 1 * sortDir;
@@ -308,9 +328,11 @@ function renderStats() {
   var open = tickets.filter(function (t) { return (t.status || 'New') !== 'Resolved'; });
   var highOpen = open.filter(function (t) { return t.urgency === 'High'; });
   var newCount = tickets.filter(function (t) { return (t.status || 'New') === 'New'; });
+  var overdue = open.filter(function (t) { return ageDays(t) >= 7; });
   var cards = [
     ['Total', tickets.length], ['Open', open.length],
-    ['High & open', highOpen.length], ['New', newCount.length]
+    ['High & open', highOpen.length], ['New', newCount.length],
+    ['Overdue >7d', overdue.length]
   ];
   document.getElementById('stats').innerHTML = cards.map(function (c) {
     return '<div class="stat"><div class="n">' + c[1] + '</div><div class="l">' + c[0] + '</div></div>';
@@ -344,15 +366,20 @@ function render() {
       return '<option' + (s === (t.status || 'New') ? ' selected' : '') + '>' + s + '</option>';
     }).join('');
     var u = t.urgency || '';
+    var ai = ageInfo(t);
     var descShort = esc((t.description || '').slice(0, 90)) + ((t.description || '').length > 90 ? '…' : '');
     return '<tr class="' + ((t.status || 'New') === 'Resolved' ? 'resolved' : '') + '" data-row="' + t.row + '">' +
+      '<td class="muted">' + esc(t.ticketNo) + '</td>' +
       '<td><span class="badge u-' + esc(u) + '">' + esc(u || '—') + '</span></td>' +
       '<td class="sn">' + esc(t.sn) + '</td>' +
       '<td>' + esc(t.issue) + '</td>' +
+      '<td class="' + ai.cls + '">' + ai.text + '</td>' +
       '<td>' + esc(t.teacherEmail || t.teacherName) + '</td>' +
       '<td>' + esc(t.room) + '</td>' +
       '<td class="muted">' + esc(fmtDate(t.timestamp)) + '</td>' +
       '<td><select class="status" data-row="' + t.row + '">' + statusOpts + '</select></td>' +
+      '<td><input class="edit" data-field="assignedTo" data-row="' + t.row + '" value="' + esc(t.assignedTo) + '" placeholder="—"></td>' +
+      '<td><input class="edit" data-field="studentAtFault" data-row="' + t.row + '" value="' + esc(t.studentAtFault) + '" placeholder="—"></td>' +
       '<td><input class="notes" data-row="' + t.row + '" value="' + esc(t.notes) + '" placeholder="Add note…"></td>' +
       '<td class="desc" title="' + esc(t.description) + '">' + descShort + '</td>' +
       '</tr>';
@@ -363,6 +390,12 @@ function render() {
   });
   Array.prototype.forEach.call(tb.querySelectorAll('input.notes'), function (inp) {
     inp.onchange = function () { updateField(inp.getAttribute('data-row'), { notes: inp.value }); };
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll('input.edit'), function (inp) {
+    inp.onchange = function () {
+      var f = {}; f[inp.getAttribute('data-field')] = inp.value;
+      updateField(inp.getAttribute('data-row'), f);
+    };
   });
   if (activeTab === 'reports') renderReports();
 }
@@ -441,8 +474,24 @@ function renderReports() {
   var byIssue = Object.keys(im).map(function (k) { return { label: k, value: im[k] }; })
     .sort(function (a, b) { return b.value - a.value; }).slice(0, 8);
 
+  // Lifetime section (current month + all archives), fetched from the 'stats' endpoint.
+  var histHtml;
+  if (statsData) {
+    var avg = statsData.avgResolutionDays != null
+      ? statsData.avgResolutionDays.toFixed(1) + ' days (' + statsData.resolvedCount + ' resolved)' : '—';
+    histHtml =
+      '<div class="rnote" style="margin-top:20px"><b>Lifetime — all months incl. archives</b> · average resolution time: ' + esc(avg) + '</div>' +
+      '<div class="reports">' +
+        '<div class="chart-card"><h3>Repeat devices (most tickets)</h3>' + barChart(statsData.byDevice || []) + '</div>' +
+        '<div class="chart-card"><h3>Repeat students at fault</h3>' + barChart(statsData.byStudent || []) + '</div>' +
+      '</div>';
+  } else {
+    histHtml = '<div class="rnote" style="margin-top:20px">Loading lifetime history…</div>';
+    fetchStats();
+  }
+
   document.getElementById('reportsView').innerHTML =
-    '<div class="rnote">Reflects current (non-archived) tickets — ' + tickets.length + ' total. ' +
+    '<div class="rnote">Charts below reflect current (non-archived) tickets — ' + tickets.length + ' total. ' +
       'Past months live in their own <b>[Month+YY]_Tickets</b> sheet tabs.</div>' +
     '<div class="reports">' +
       '<div class="chart-card"><h3>By urgency</h3>' + barChart(byUrg) + '</div>' +
@@ -450,6 +499,7 @@ function renderReports() {
       '<div class="chart-card"><h3>Top issue types</h3>' + barChart(byIssue) + '</div>' +
       '<div class="chart-card"><h3>New tickets · last 14 days</h3>' + dayTrend() + '</div>' +
     '</div>' +
+    histHtml +
     '<div class="chart-card" style="margin-top:14px">' +
       '<h3>Archive</h3>' +
       '<div class="rnote">Test the monthly archive: copies current tickets into a new ' +
@@ -458,6 +508,16 @@ function renderReports() {
     '</div>';
 
   document.getElementById('testArchiveBtn').onclick = testArchive;
+}
+
+var statsData = null, statsLoading = false;
+function fetchStats() {
+  if (statsLoading) return;
+  statsLoading = true;
+  jsonp({ action: 'stats', token: token }).then(function (res) {
+    statsLoading = false;
+    if (res && res.ok) { statsData = res; if (activeTab === 'reports') renderReports(); }
+  }).catch(function () { statsLoading = false; });
 }
 
 function testArchive() {
