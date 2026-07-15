@@ -216,6 +216,27 @@ function deviceLookup_(p) {
 }
 
 // ---- Photos ----
+// RUN THIS ONCE from the editor: it triggers the Drive authorization prompt and
+// verifies the script can actually write to PHOTO_FOLDER_ID. Check the log/result.
+function testPhotoSetup() {
+  var out = [];
+  try {
+    var f = DriveApp.getFolderById(PHOTO_FOLDER_ID);
+    out.push('Folder found: "' + f.getName() + '"');
+    var t = f.createFile(Utilities.newBlob('cpa-it test', 'text/plain', 'cpa-it-test.txt'));
+    out.push('Write OK: ' + t.getUrl());
+    t.setTrashed(true);
+    out.push('Cleanup OK — photos will save here.');
+  } catch (e) {
+    out.push('FAILED: ' + e);
+    out.push('If this is an authorization error, approve the Drive prompt and run again.');
+    out.push('If it is "not found"/"access denied", the account running this script cannot');
+    out.push('edit folder ' + PHOTO_FOLDER_ID + ' — share it with this account as Editor.');
+  }
+  var msg = out.join('\n');
+  Logger.log(msg);
+  return msg;
+}
 // Saves a base64 data-URL photo into the Drive folder and returns its shareable URL.
 function savePhoto_(dataUrl, name) {
   if (!dataUrl || String(dataUrl).indexOf('data:') !== 0) return '';
@@ -282,7 +303,10 @@ function doPost(e) {
     var photoUrl = '';
     try {
       photoUrl = savePhoto_(data.photo, 'CB_' + (data.sn || 'unknown') + '_ticket' + no + '.jpg');
-    } catch (e) { photoUrl = ''; }   // never fail a ticket because of a photo
+    } catch (e) {
+      photoUrl = '';                        // never fail a ticket because of a photo
+      Logger.log('photo save failed: ' + e); // shows in Executions log
+    }
 
     var now = new Date();
     sheet.appendRow([
