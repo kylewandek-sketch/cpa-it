@@ -104,6 +104,26 @@
          font-size:14px; font-weight:600; border-bottom:3px solid transparent; margin-bottom:-1px; }
   .tab.active { color:var(--ink); border-bottom-color:var(--blue); }
 
+  /* To-Do */
+  .todo-add { display:flex; gap:8px; margin-bottom:14px; max-width:640px; }
+  .todo-add input { flex:1; padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+                    background:var(--card); color:var(--ink); font-size:14px; }
+  .todo-list { list-style:none; margin:0; padding:0; max-width:860px; }
+  .todo-item { display:flex; align-items:flex-start; gap:10px; background:var(--card);
+               border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; }
+  .todo-item.dragging { opacity:.4; }
+  .todo-item .handle { cursor:grab; color:var(--muted); font-size:15px; padding-top:1px;
+                       user-select:none; -webkit-user-select:none; }
+  .todo-item input[type=checkbox] { margin-top:3px; width:16px; height:16px; flex-shrink:0; }
+  .todo-item .txt { flex:1; font-size:14px; line-height:1.45; word-break:break-word; padding-top:1px; }
+  .todo-item.done .txt { text-decoration:line-through; color:var(--muted); }
+  .todo-item .txt input { width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:6px;
+                          background:var(--page); color:var(--ink); font-size:14px; }
+  .todo-item .acts { display:flex; gap:6px; flex-shrink:0; }
+  .todo-item .acts button { background:transparent; border:1px solid var(--line); border-radius:6px;
+                            cursor:pointer; color:var(--muted); padding:3px 8px; font-size:13px; }
+  .todo-item .acts button:hover { color:var(--ink); }
+
   /* Reports */
   .rnote { font-size:12px; color:var(--muted); margin:0 2px 12px; }
   .reports { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
@@ -151,6 +171,7 @@
       <button id="tabTickets" class="tab active">Tickets</button>
       <button id="tabReports" class="tab">Reports</button>
       <button id="tabLookup" class="tab">Lookup</button>
+      <button id="tabTodo" class="tab">To-Do</button>
     </div>
     <div class="stats" id="stats"></div>
 
@@ -196,6 +217,15 @@
         </div>
       </div>
       <div id="lu_results" style="margin-top:14px"></div>
+    </div>
+
+    <div id="todoView" class="hidden">
+      <div class="todo-add">
+        <input type="text" id="todoNew" placeholder="New to-do…">
+        <button class="btn primary" id="todoAddBtn">Add</button>
+      </div>
+      <ul class="todo-list" id="todoList"></ul>
+      <div id="todoEmpty" class="empty hidden">No to-dos yet. Add one above.</div>
     </div>
   </div>
 </div>
@@ -10583,7 +10613,7 @@ function updateField(row, fields) {
 
 // ---- Reports (charts from the currently loaded tickets) ----
 var activeTab = 'tickets';
-var TABS = { tickets: 'tabTickets', reports: 'tabReports', lookup: 'tabLookup' };
+var TABS = { tickets: 'tabTickets', reports: 'tabReports', lookup: 'tabLookup', todo: 'tabTodo' };
 Object.keys(TABS).forEach(function (name) {
   document.getElementById(TABS[name]).onclick = function () { setTab(name); };
 });
@@ -10594,6 +10624,7 @@ function setTab(t) {
     document.getElementById(name + 'View').classList.toggle('hidden', name !== t);
   });
   if (t === 'reports') renderReports();
+  if (t === 'todo') loadTodos();
   if (t !== 'lookup') stopScan();
 }
 
@@ -10829,6 +10860,159 @@ function testArchive() {
     btn.disabled = false; btn.textContent = label; toast('Test archive failed: ' + err.message);
   });
 }
+
+// ---- To-Do tab ----
+var todos = [];
+var todosLoading = false;
+
+function loadTodos() {
+  if (todosLoading) return;
+  todosLoading = true;
+  jsonp({ action: 'todoList', token: token }).then(function (res) {
+    todosLoading = false;
+    if (!res || res.ok === false) { toast('Could not load to-dos'); return; }
+    todos = res.todos || [];
+    renderTodos();
+  }).catch(function (err) {
+    todosLoading = false;
+    toast('To-do load failed: ' + err.message);
+  });
+}
+
+function findTodo(id) {
+  for (var i = 0; i < todos.length; i++) {
+    if (todos[i].id === id) return todos[i];
+  }
+  return null;
+}
+
+function renderTodos() {
+  var ul = document.getElementById('todoList');
+  ul.innerHTML = '';
+  todos.forEach(function (t) {
+    var li = document.createElement('li');
+    li.className = 'todo-item';
+    if (t.done) li.className = 'todo-item done';
+    li.setAttribute('data-id', t.id);
+    li.setAttribute('draggable', 'true');
+    li.innerHTML =
+      '<span class="handle" title="Drag to reorder">⠿</span>' +
+      '<input type="checkbox" class="todo-check" title="Mark done">' +
+      '<div class="txt">' + esc(t.text) + '</div>' +
+      '<div class="acts">' +
+        '<button class="todo-edit" title="Edit">✎</button>' +
+        '<button class="todo-del" title="Delete">✕</button>' +
+      '</div>';
+    li.querySelector('.todo-check').checked = t.done;
+    ul.appendChild(li);
+  });
+  var empty = document.getElementById('todoEmpty');
+  if (todos.length > 0) empty.classList.add('hidden');
+  else empty.classList.remove('hidden');
+}
+
+function todoSave(params, failMsg) {
+  params.token = token;
+  jsonp(params).then(function (res) {
+    if (!res || res.ok === false) {
+      toast(failMsg + ': ' + ((res && res.error) || 'save failed') + ' — refresh');
+    }
+  }).catch(function (err) { toast(failMsg + ': ' + err.message + ' — refresh'); });
+}
+
+function addTodo() {
+  var inp = document.getElementById('todoNew');
+  var text = inp.value.trim();
+  if (!text) return;
+  var btn = document.getElementById('todoAddBtn');
+  btn.disabled = true;
+  jsonp({ action: 'todoAdd', token: token, text: text }).then(function (res) {
+    btn.disabled = false;
+    if (!res || res.ok === false) { toast('Add failed: ' + ((res && res.error) || 'error')); return; }
+    todos.push({ id: res.id, text: text, done: false, order: todos.length + 1 });
+    inp.value = '';
+    renderTodos();
+    toast('Added');
+  }).catch(function (err) { btn.disabled = false; toast('Add failed: ' + err.message); });
+}
+
+function startTodoEdit(li, t) {
+  var txtDiv = li.querySelector('.txt');
+  txtDiv.innerHTML = '<input type="text">';
+  var inp = txtDiv.querySelector('input');
+  inp.value = t.text;
+  inp.focus();
+  function save() {
+    var v = inp.value.trim();
+    if (!v || v === t.text) { renderTodos(); return; }
+    t.text = v;                      // optimistic
+    renderTodos();
+    todoSave({ action: 'todoUpdate', id: t.id, text: v }, 'Edit failed');
+  }
+  inp.onkeydown = function (e) {
+    if (e.key === 'Enter') inp.blur();
+    if (e.key === 'Escape') { inp.onblur = null; renderTodos(); }
+  };
+  inp.onblur = save;
+}
+
+document.getElementById('todoAddBtn').onclick = addTodo;
+document.getElementById('todoNew').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') addTodo();
+});
+
+// Check / edit / delete via one listener on the list.
+document.getElementById('todoList').addEventListener('click', function (e) {
+  var li = e.target.closest('.todo-item');
+  if (!li) return;
+  var t = findTodo(li.getAttribute('data-id'));
+  if (!t) return;
+  if (e.target.classList.contains('todo-check')) {
+    t.done = e.target.checked;       // optimistic
+    renderTodos();
+    todoSave({ action: 'todoUpdate', id: t.id, done: t.done }, 'Save failed');
+  } else if (e.target.classList.contains('todo-edit')) {
+    startTodoEdit(li, t);
+  } else if (e.target.classList.contains('todo-del')) {
+    if (!confirm('Delete this to-do?\n\n' + t.text)) return;
+    todos = todos.filter(function (x) { return x.id !== t.id; });
+    renderTodos();
+    todoSave({ action: 'todoDelete', id: t.id }, 'Delete failed');
+  }
+});
+
+// Drag to reorder.
+var dragLi = null;
+document.getElementById('todoList').addEventListener('dragstart', function (e) {
+  dragLi = e.target.closest('.todo-item');
+  if (dragLi) dragLi.classList.add('dragging');
+});
+document.getElementById('todoList').addEventListener('dragover', function (e) {
+  e.preventDefault();                // required to allow dropping
+  if (!dragLi) return;
+  var over = e.target.closest('.todo-item');
+  if (!over || over === dragLi) return;
+  var rect = over.getBoundingClientRect();
+  var below = e.clientY > rect.top + rect.height / 2;
+  if (below) over.parentNode.insertBefore(dragLi, over.nextSibling);
+  else over.parentNode.insertBefore(dragLi, over);
+});
+document.getElementById('todoList').addEventListener('dragend', function () {
+  if (!dragLi) return;
+  dragLi.classList.remove('dragging');
+  dragLi = null;
+  // Rebuild the array to match the new DOM order, then save it.
+  var ids = [];
+  var lis = document.getElementById('todoList').querySelectorAll('.todo-item');
+  lis.forEach(function (li) { ids.push(li.getAttribute('data-id')); });
+  var reordered = [];
+  ids.forEach(function (id) {
+    var t = findTodo(id);
+    if (t) reordered.push(t);
+  });
+  todos = reordered;
+  todoSave({ action: 'todoReorder', ids: ids.join(',') }, 'Reorder failed');
+});
 
 // filters
 ['search', 'fStatus', 'fUrgency', 'hideResolved'].forEach(function (id) {

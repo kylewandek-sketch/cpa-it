@@ -22,7 +22,8 @@ var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov',
 function doGet(e) {
   var p = (e && e.parameter) || {};
   var out;
-  var guarded = ['list', 'update', 'archiveTest', 'stats', 'lookup'];
+  var guarded = ['list', 'update', 'archiveTest', 'stats', 'lookup',
+                 'todoList', 'todoAdd', 'todoUpdate', 'todoDelete', 'todoReorder'];
   if (guarded.indexOf(p.action) >= 0 && p.token !== ADMIN_TOKEN) {
     out = { ok: false, error: 'unauthorized' };
   } else if (p.action === 'list') {
@@ -35,6 +36,16 @@ function doGet(e) {
     out = deviceLookup_(p);
   } else if (p.action === 'archiveTest') {
     out = archiveCopy_(false);
+  } else if (p.action === 'todoList') {
+    out = todoList_();
+  } else if (p.action === 'todoAdd') {
+    out = todoAdd_(p);
+  } else if (p.action === 'todoUpdate') {
+    out = todoUpdate_(p);
+  } else if (p.action === 'todoDelete') {
+    out = todoDelete_(p);
+  } else if (p.action === 'todoReorder') {
+    out = todoReorder_(p);
   } else if (p.action === 'openCount') {
     out = openCount_(p);          // public: duplicate-open-ticket check for the submit form
   } else {
@@ -213,6 +224,141 @@ function deviceLookup_(p) {
   } catch (e) { out.ticketError = String(e); }
 
   return out;
+}
+
+// ---- To-Do list (dashboard "To-Do" tab) ----
+// Items live in a 'Todos' sheet tab: ID | Text | Done | Order | Created.
+var TODO_SHEET_NAME = 'Todos';
+var TODO_HEADERS = ['ID', 'Text', 'Done', 'Order', 'Created'];
+
+function todoSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(TODO_SHEET_NAME);
+  if (!sh) {
+    sh = ss.insertSheet(TODO_SHEET_NAME, ss.getNumSheets());
+    sh.getRange(1, 1, 1, TODO_HEADERS.length).setValues([TODO_HEADERS]);
+    sh.getRange(1, 1, 1, TODO_HEADERS.length).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function todoList_() {
+  var sh = todoSheet_();
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: true, todos: [] };
+  var v = sh.getRange(2, 1, lastRow - 1, TODO_HEADERS.length).getValues();
+  var todos = [];
+  v.forEach(function (r) {
+    if (!r[0]) return;
+    var done = false;
+    if (r[2] === true || r[2] === 'TRUE') done = true;
+    todos.push({ id: String(r[0]), text: String(r[1]), done: done, order: Number(r[3]) || 0 });
+  });
+  todos.sort(function (a, b) { return a.order - b.order; });
+  return { ok: true, todos: todos };
+}
+
+function todoFindRow_(sh, id) {
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return 0;
+  var v = sh.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < v.length; i++) {
+    if (String(v[i][0]) === String(id)) return i + 2;
+  }
+  return 0;
+}
+
+function todoAdd_(p) {
+  var text = String(p.text || '').trim();
+  if (!text) return { ok: false, error: 'empty text' };
+  var sh = todoSheet_();
+  var id = String(new Date().getTime());
+  var order = sh.getLastRow();   // new items go to the bottom
+  sh.appendRow([id, text, false, order, new Date()]);
+  return { ok: true, id: id };
+}
+
+function todoUpdate_(p) {
+  var sh = todoSheet_();
+  var row = todoFindRow_(sh, p.id);
+  if (!row) return { ok: false, error: 'not found' };
+  if (p.text != null) sh.getRange(row, 2).setValue(String(p.text));
+  if (p.done != null) sh.getRange(row, 3).setValue(String(p.done) === 'true');
+  return { ok: true };
+}
+
+function todoDelete_(p) {
+  var sh = todoSheet_();
+  var row = todoFindRow_(sh, p.id);
+  if (!row) return { ok: false, error: 'not found' };
+  sh.deleteRow(row);
+  return { ok: true };
+}
+
+// ids arrives as a comma-separated list in the new display order.
+function todoReorder_(p) {
+  var ids = String(p.ids || '').split(',');
+  var sh = todoSheet_();
+  for (var i = 0; i < ids.length; i++) {
+    var row = todoFindRow_(sh, ids[i]);
+    if (row) sh.getRange(row, 4).setValue(i + 1);
+  }
+  return { ok: true };
+}
+
+// RUN THIS ONCE from the editor to load the summer 2026 check/repair cross-reference
+// findings into the to-do list. It refuses to run if the Todos tab already has items.
+function seedTodos() {
+  var sh = todoSheet_();
+  if (sh.getLastRow() > 1) {
+    Logger.log('Todos tab already has items - not seeding again.');
+    return 'Todos tab already has items - not seeding again.';
+  }
+  var items = [
+    'Cart O: fix state-testing browser on 20 HP units (2HA99...) - likely enrollment issue, one unit noted not enrolled to @CPAohio.org',
+    'Cart O: fix duplicate serial - #6 and #25 both entered with matching serials (2HA99FEN501098M / 2HA99FEN511183W)',
+    'Cart C: open tickets - #7, #13, #22 missing from cart; #12, #23, #26, #27 chargers dead; #18 not working + testing browser. Flagged since spring break, never ticketed',
+    'Cart G: state-testing browser not working on #25-#28 (also flagged at spring break, no tickets)',
+    'Cart Y: #5, #23, #27 not working with dead chargers - no tickets on file',
+    'Cart K: #26 missing/broken; #1 power key missing; #23 spacebar missing; #8 hinge dislocating; #4 and #18 chargers dead',
+    'Cart K: Adams Smartpass iPad and Karim Shabana iPad both missing/not working',
+    'Cart J: #11 charging port missing, #28 screen scratched + no serial label, #9 hinge super loose - identical notes since spring break, never ticketed',
+    'Cart A #18 (NXHBNAA0019160FFC07600): in repair since 5/15 (screen will not turn on) - never returned',
+    'Cart A (NXHBNAA0019160FE837600): in repair since 4/17 (stuck on white screen) - never returned',
+    'Cart B #13 (NXH8VAA0060400FD467611): screen broken, in repair since 1/14 - never returned; note says headphone jack blocked all year',
+    'Chase 5 iPads never returned from repair: Ljungren DMQSJ599HGSD (9/3/25), Seggerson DMQPH5ZZFK10 (9/22/25), Wand DMQPH9V4FK10 (9/22/25), Caudill DMQPHDLPFK10 (11/11/25), Buechner DMPPDS94FK10 (3/4/26)',
+    'Ljungren Smartpass iPad (DMQPHCTGFK10): screen broken, in repair since 2/27 - never returned; SOY note says Smart Pass not working',
+    'Cart D (NXHBNAA0019252726A7600): 3 wifi repairs with the same complaint - replace wifi card or retire the unit',
+    'Cart N (G5LG0H3): 3 repair visits (trackpad x2, then screen) - consider retiring',
+    'Cart K (NXHBNAA00191610D527600): keyboard still dead after 2 repair visits - repair did not take',
+    'Cart D (NXHBNAA001916101BF7600): came back not working after 4/10 repair, in again 4/24 - verify it is actually fixed',
+    'Cart H: missing keys on #8, #12, #14, #15, #27; hinges on #10 and #19 - no tickets',
+    'Cart H #16: repair log says returned 1/5 but start-of-year check says missing - reconcile',
+    'Cart I #4 and #9: marked returned from enrollment fix 1/5 but start-of-year check says not in cart - locate',
+    'Cart Y #13 and #25: marked returned 1/5 but start-of-year check says missing - locate',
+    'Cart T #26: will not turn on - open ticket',
+    'ESL #6: trackpad broken and taped shut - open ticket',
+    'Cart B: #1 charger dead since spring break; #23 not working; #3 and #7 missing keys; MP1M1ZX2 number keys acting up again after repair',
+    'Cart A: #19 hinge loose; #3 and #7 chargers dead; Eduanny ESL iPad charger missing (flagged both checks)',
+    'Caudill iPad #95 was swapped out - update roster (teacher now has 24 iPads)',
+    'Miller iPad #44: needs an extra charger',
+    'Cart W #28: on loan to SPED - track it and get it back',
+    'Cart V #12: state test app missing - reinstall',
+    'Cart X #1: keys missing',
+    'Cart D #14: D key cap missing (key still works) - since spring break',
+    'Re-check Carts AA, F, Y: checker marked every box TRUE (treated checkmark as OK), so Keys Missing / Hinge Broken columns are unreliable',
+    'Finish start-of-year checks - untouched sheets: BB (Moorman), Aeh, Perez, Moorman iPads, Title 1, Hunter iPad cart'
+  ];
+  var now = new Date();
+  var base = now.getTime();
+  var rows = [];
+  for (var i = 0; i < items.length; i++) {
+    rows.push([String(base + i), items[i], false, i + 1, now]);
+  }
+  sh.getRange(2, 1, rows.length, TODO_HEADERS.length).setValues(rows);
+  Logger.log('Seeded ' + rows.length + ' to-dos.');
+  return 'Seeded ' + rows.length + ' to-dos.';
 }
 
 // ---- Photos ----
