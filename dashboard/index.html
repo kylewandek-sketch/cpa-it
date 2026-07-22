@@ -239,6 +239,12 @@
     </div>
 
     <div id="todoView" class="hidden">
+      <div class="controls">
+        <select id="todoSort">
+          <option value="cart">Sort: cart order</option>
+          <option value="most">Sort: most to-do first</option>
+        </select>
+      </div>
       <div class="cart-grid" id="cartGrid"></div>
       <div id="todoPanel" class="todo-panel hidden">
         <div class="tp-head">
@@ -10930,6 +10936,17 @@ var selectedGroup = '';
 try { selectedGroup = localStorage.getItem(SEL_KEY) || ''; } catch (e) { selectedGroup = ''; }
 var extraGroups = [];   // custom groups created this session that have no tasks yet
 
+// Tile sort: 'cart' (roster order) or 'most' (most open to-dos first).
+var SORT_KEY = 'cpa_todo_sort';
+var todoSortMode = 'cart';
+try { todoSortMode = localStorage.getItem(SORT_KEY) || 'cart'; } catch (e) { todoSortMode = 'cart'; }
+document.getElementById('todoSort').value = todoSortMode;
+document.getElementById('todoSort').addEventListener('change', function () {
+  todoSortMode = this.value;
+  try { localStorage.setItem(SORT_KEY, todoSortMode); } catch (e) {}
+  renderTodos();
+});
+
 function groupOf(t) {
   if (t.group) return t.group;
   return 'General';
@@ -10978,7 +10995,21 @@ function renderTodos() {
 function renderCartGrid() {
   var grid = document.getElementById('cartGrid');
   grid.innerHTML = '';
-  allGroups().forEach(function (g) {
+  var names = allGroups();
+  if (todoSortMode === 'most') {
+    // Highest open count first; ties keep cart order.
+    var openCount = {};
+    names.forEach(function (g) {
+      openCount[g] = groupItems(g).filter(function (t) { return !t.done; }).length;
+    });
+    var indexed = names.map(function (g, i) { return { g: g, i: i }; });
+    indexed.sort(function (a, b) {
+      if (openCount[b.g] !== openCount[a.g]) return openCount[b.g] - openCount[a.g];
+      return a.i - b.i;
+    });
+    names = indexed.map(function (x) { return x.g; });
+  }
+  names.forEach(function (g) {
     var items = groupItems(g);
     var open = items.filter(function (t) { return !t.done; }).length;
 
