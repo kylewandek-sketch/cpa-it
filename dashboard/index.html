@@ -10501,8 +10501,8 @@ function refreshTodosNow() {
     var bits = [];
     if (res.added) bits.push(res.added + ' note(s) added');
     if (res.dropped) bits.push(res.dropped + ' cleared');
-    if (bits.length) toast('To-do list up to date — ' + bits.join(', '));
-    else toast('To-do list already up to date');
+    if (bits.length) toast('Tasks and closed log up to date — ' + bits.join(', '));
+    else toast('Tasks and closed log already up to date');
   }).catch(function (err) {
     btn.disabled = false;
     toast('To-do refresh failed: ' + err.message);
@@ -11054,42 +11054,44 @@ function showClosedHistory() {
                       esc((res && res.error) || 'unknown error') + '</div>';
       return;
     }
-    pendingNotes = res.notes || [];
-    renderTodos();
-    var history = res.history || [];
-    if (!history.length) {
-      box.innerHTML = '<div class="tp-head"><h3>Closed in the last 7 days</h3>' +
-        '<span style="flex:1"></span><button class="btn" id="closedCloseBtn">✕ Close</button></div>' +
-        '<div class="empty">Nothing has been closed in the last 7 days.</div>';
-      wireClosedClose(box);
-      return;
-    }
-    // which of these are still sitting in the master?
-    var stillThere = {};
-    for (var i = 0; i < pendingNotes.length; i++) {
-      stillThere[pendingNotes[i].sn + '|' + pendingNotes[i].note] = pendingNotes[i].cell;
-    }
-    var rows = history.map(function (h) {
-      var cell = stillThere[h.sn + '|' + h.note];
-      var state = '<span class="pill-done">cleared</span>';
-      if (cell) state = '<span class="pill-todo">still in master · ' + esc(cell) + '</span>';
-      var when = new Date(h.closedAt);
-      return '<tr><td>' + esc(when.toLocaleDateString()) + ' ' +
-             esc(when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) + '</td>' +
-             '<td>' + esc(h.cart) + '</td><td>' + esc(h.note) + '</td>' +
-             '<td>' + esc(h.sn) + '</td><td>' + esc(h.how) + '</td><td>' + state + '</td></tr>';
-    }).join('');
-    box.innerHTML =
-      '<div class="tp-head"><h3>Closed in the last 7 days (' + history.length + ')</h3>' +
-      '<span style="flex:1"></span><button class="btn" id="closedCloseBtn">✕ Close</button></div>' +
-      '<div class="tablewrap"><table><thead><tr><th>Closed</th><th>Cart</th><th>Note</th>' +
-      '<th>S/N</th><th>How</th><th>In the master</th></tr></thead><tbody>' + rows +
-      '</tbody></table></div>';
-    wireClosedClose(box);
+    applyNotesResponse(res, true);
     box.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }).catch(function (err) {
     box.innerHTML = '<div class="empty">Could not load: ' + esc(err.message) + '</div>';
   });
+}
+
+function renderClosedHistory(res, box) {
+  box.classList.remove('hidden');
+  var history = res.history || [];
+  if (!history.length) {
+    box.innerHTML = '<div class="tp-head"><h3>Closed in the last 7 days</h3>' +
+      '<span style="flex:1"></span><button class="btn" id="closedCloseBtn">✕ Close</button></div>' +
+      '<div class="empty">Nothing has been closed in the last 7 days.</div>';
+    wireClosedClose(box);
+    return;
+  }
+  var stillThere = {};
+  for (var i = 0; i < pendingNotes.length; i++) {
+    stillThere[pendingNotes[i].sn + '|' + pendingNotes[i].note] = pendingNotes[i].cell;
+  }
+  var rows = history.map(function (h) {
+    var cell = stillThere[h.sn + '|' + h.note];
+    var state = '<span class="pill-done">cleared</span>';
+    if (cell) state = '<span class="pill-todo">still in master · ' + esc(cell) + '</span>';
+    var when = new Date(h.closedAt);
+    return '<tr><td>' + esc(when.toLocaleDateString()) + ' ' +
+           esc(when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) + '</td>' +
+           '<td>' + esc(h.cart) + '</td><td>' + esc(h.note) + '</td>' +
+           '<td>' + esc(h.sn) + '</td><td>' + esc(h.how) + '</td><td>' + state + '</td></tr>';
+  }).join('');
+  box.innerHTML =
+    '<div class="tp-head"><h3>Closed in the last 7 days (' + history.length + ')</h3>' +
+    '<span style="flex:1"></span><button class="btn" id="closedCloseBtn">✕ Close</button></div>' +
+    '<div class="tablewrap"><table><thead><tr><th>Closed</th><th>Cart</th><th>Note</th>' +
+    '<th>S/N</th><th>How</th><th>In the master</th></tr></thead><tbody>' + rows +
+    '</tbody></table></div>';
+  wireClosedClose(box);
 }
 
 function wireClosedClose(box) {
@@ -11140,11 +11142,20 @@ var TODO_STATUSES = ['Untouched', 'Noticed', 'Working', 'Stalled', 'Progressing'
 // delete -- so they show in the cart panel shaded red.
 var pendingNotes = [];
 
+// notesToClear carries both halves: the notes still sitting in the master, and
+// the closed log behind them. One call updates the red rows, the cart badges
+// and the closed list, so Refresh keeps all three in step.
+function applyNotesResponse(res, openHistory) {
+  pendingNotes = res.notes || [];
+  renderTodos();
+  var box = document.getElementById('closedHistory');
+  if (openHistory || !box.classList.contains('hidden')) renderClosedHistory(res, box);
+}
+
 function loadPendingNotes() {
-  jsonp({ action: 'notesToClear', token: token }).then(function (res) {
+  jsonp({ action: 'notesToClear', token: token }, 60000).then(function (res) {
     if (!res || res.ok === false) return;
-    pendingNotes = res.notes || [];
-    renderTodos();
+    applyNotesResponse(res, false);
   }).catch(function () {});
 }
 
