@@ -10426,9 +10426,35 @@ var form = document.getElementById('ticket');
 var formmsg = document.getElementById('formmsg');
 var submitbtn = document.getElementById('submitbtn');
 
+// Does this even look like a device serial? Chromebook and iPad serials run 8
+// to 24 characters, letters and digits only, and always contain both. An
+// all-digit entry is usually the short SNID barcode, not the S/N.
+function looksLikeSerial(sn) {
+  var s = String(sn || '').replace(/[\s-]+/g, '').toUpperCase();
+  if (s.length < 8 || s.length > 24) return false;
+  if (!/^[A-Z0-9]+$/.test(s)) return false;
+  if (!/[A-Z]/.test(s)) return false;
+  if (!/[0-9]/.test(s)) return false;
+  return true;
+}
+
+var CHECK_LABEL_MSG = 'Check the S/N printed on the device label — it is the longer code of ' +
+                      'letters and numbers, usually on the sticker underneath the Chromebook.';
+
 form.addEventListener('submit', function (e) {
   e.preventDefault();
   if (!form.reportValidity()) return;
+
+  var typedSn = document.getElementById('fld_sn').value.trim();
+  if (!looksLikeSerial(typedSn)) {
+    if (!confirm('"' + typedSn + '" does not look like a Chromebook serial number.\n\n' +
+                 CHECK_LABEL_MSG + '\n\nSubmit anyway?')) {
+      formmsg.textContent = 'Please check the S/N on the device label, then submit again.';
+      formmsg.className = 'status err';
+      document.getElementById('fld_sn').focus();
+      return;
+    }
+  }
   if (TICKET_ENDPOINT.indexOf('PASTE_') === 0) {
     formmsg.textContent = 'Submission isn’t configured yet (missing Apps Script URL). Contact the admin.';
     formmsg.className = 'status err';
@@ -10455,9 +10481,23 @@ form.addEventListener('submit', function (e) {
   }).then(function (res) {
     if (res && res.ok && res.count > 0) {
       if (!confirm('There is already an open ticket for this Chromebook (S/N ' + payload.sn +
-                   '). Submit another anyway?')) {
-        submitbtn.disabled = false; formmsg.textContent = ''; return;
+                   '). Submit another anyway?')) return 'cancel';
+    }
+    // Is the serial actually on the roster? A typo can still look like a serial.
+    formmsg.textContent = 'Checking the serial against inventory…';
+    return jsonp({ action: 'snCheck', sn: payload.sn }).then(function (chk) {
+      if (chk && chk.ok && chk.found === false) {
+        if (!confirm('S/N ' + payload.sn + ' was not found in the Chromebook inventory.\n\n' +
+                     CHECK_LABEL_MSG + '\n\nSubmit anyway?')) return 'cancel';
       }
+      return 'go';
+    }, function () { return 'go'; });      // check unavailable: never block a ticket
+  }).then(function (verdict) {
+    if (verdict === 'cancel') {
+      submitbtn.disabled = false;
+      formmsg.textContent = 'Please check the S/N on the device label, then submit again.';
+      formmsg.className = 'status err';
+      return;
     }
     postTicket(payload);
   }).catch(function () { postTicket(payload); });   // if a check fails, don't block submission

@@ -244,6 +244,8 @@
           <option value="cart">Sort: cart order</option>
           <option value="most">Sort: most to-do first</option>
         </select>
+        <button class="btn" id="notesToClearBtn"
+                title="Notes finished with, that are still written in the master workbook">Notes to clear</button>
       </div>
       <div class="cart-grid" id="cartGrid"></div>
       <div id="todoPanel" class="todo-panel hidden">
@@ -260,6 +262,7 @@
           <button class="btn primary" id="todoAddBtn">Add</button>
         </div>
       </div>
+      <div id="notesToClear" class="hidden" style="margin:24px 0 0"></div>
     </div>
   </div>
 </div>
@@ -10405,11 +10408,15 @@ function ageInfo(t) {
 }
 
 // ---- JSONP (avoids CORS with Apps Script) ----
-function jsonp(params) {
+// timeoutMs is optional -- the to-do refresh rebuilds from ~50 roster tabs and
+// needs longer than a normal call.
+function jsonp(params, timeoutMs) {
   return new Promise(function (resolve, reject) {
     var cb = 'cb_' + Math.random().toString(36).slice(2);
     var s = document.createElement('script');
-    var timer = setTimeout(function () { cleanup(); reject(new Error('Request timed out')); }, 20000);
+    var wait = timeoutMs;
+    if (!wait) wait = 20000;
+    var timer = setTimeout(function () { cleanup(); reject(new Error('Request timed out')); }, wait);
     function cleanup() { clearTimeout(timer); delete window[cb]; if (s.parentNode) s.parentNode.removeChild(s); }
     window[cb] = function (data) { cleanup(); resolve(data); };
     s.onerror = function () { cleanup(); reject(new Error('Network error')); };
@@ -10450,7 +10457,35 @@ document.getElementById('signoutbtn').onclick = function () {
   stopAuto();
   showApp(false);
 };
-document.getElementById('refreshbtn').onclick = function () { load(false); };
+document.getElementById('refreshbtn').onclick = function () {
+  load(false);
+  refreshTodosNow();
+};
+
+// Refresh does more than reload tickets: it pulls any roster changes across
+// from the master, imports notes typed into the carts, and squares the to-do
+// list with the open tickets -- the same work the 7/9/12/3 job does.
+function refreshTodosNow() {
+  var btn = document.getElementById('refreshbtn');
+  btn.disabled = true;
+  jsonp({ action: 'refreshTodos', token: token }, 120000).then(function (res) {
+    btn.disabled = false;
+    if (!res || res.ok === false) {
+      toast('To-do refresh failed');
+      return;
+    }
+    todos = res.todos || todos;
+    renderTodos();
+    var bits = [];
+    if (res.added) bits.push(res.added + ' note(s) added');
+    if (res.dropped) bits.push(res.dropped + ' cleared');
+    if (bits.length) toast('To-do list up to date — ' + bits.join(', '));
+    else toast('To-do list already up to date');
+  }).catch(function (err) {
+    btn.disabled = false;
+    toast('To-do refresh failed: ' + err.message);
+  });
+}
 
 // ---- Auto-refresh (every 15 minutes) ----
 var AUTO_MS = 15 * 60 * 1000;
@@ -11172,6 +11207,57 @@ function startTodoEdit(li, t) {
 document.getElementById('todoAddBtn').onclick = addTodo;
 document.getElementById('todoNew').addEventListener('keydown', function (e) {
   if (e.key === 'Enter') addTodo();
+});
+
+// "Notes to clear": notes whose to-do has been ticked off but that are still
+// written in the master workbook. The script cannot edit that file, so this is
+// the list to work through by hand.
+document.getElementById('notesToClearBtn').addEventListener('click', function () {
+  var box = document.getElementById('notesToClear');
+  var btn = this;
+  if (!box.classList.contains('hidden')) {      // second click closes it
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="empty">Checking the workbook…</div>';
+  btn.disabled = true;
+  jsonp({ action: 'notesToClear', token: token }).then(function (res) {
+    btn.disabled = false;
+    if (!res || !res.ok) {
+      box.innerHTML = '<div class="empty">Could not load: ' + esc((res && res.error) || 'unknown error') + '</div>';
+      return;
+    }
+    if (!res.notes.length) {
+      box.innerHTML = '<div class="empty">Nothing to clear — every finished note is already out of the workbook.</div>';
+      return;
+    }
+    var rows = res.notes.map(function (n) {
+      return '<tr><td>' + esc(n.cart) + '</td><td>' + esc(n.cell) + '</td><td>' +
+             esc(n.sn) + '</td><td>' + esc(n.note) + '</td></tr>';
+    }).join('');
+    box.innerHTML =
+      '<div class="tp-head"><h3>' + res.notes.length + ' note(s) to delete from the master workbook</h3>' +
+      '<span style="flex:1"></span><button class="btn" id="notesCopyBtn">Copy list</button>' +
+      '<button class="btn" id="notesCloseBtn">✕ Close</button></div>' +
+      '<div class="tablewrap"><table><thead><tr><th>Cart</th><th>Cell</th><th>S/N</th><th>Note</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div>';
+    document.getElementById('notesCloseBtn').onclick = function () {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+    };
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });   // it sits at the bottom
+    document.getElementById('notesCopyBtn').onclick = function () {
+      var text = res.notes.map(function (n) {
+        return n.cart + '\t' + n.cell + '\t' + n.sn + '\t' + n.note;
+      }).join('\n');
+      navigator.clipboard.writeText(text).then(function () { toast('List copied'); },
+                                               function () { toast('Copy failed'); });
+    };
+  }).catch(function (err) {
+    btn.disabled = false;
+    box.innerHTML = '<div class="empty">Could not load: ' + esc(err.message) + '</div>';
+  });
 });
 
 // Check, edit, delete via one listener on the panel's task list.
