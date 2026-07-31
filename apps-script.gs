@@ -507,7 +507,7 @@ function ticketTodoWrite_(sn, ticketNo, description, info) {
       sh.getRange(row, 6).setValue(cart);
       return { ok: true, updated: id, group: cart };
     }
-    sh.appendRow([id, label, false, sh.getLastRow(), new Date(), cart]);
+    sh.appendRow([id, label, false, sh.getLastRow(), new Date(), cart, TODO_STATUS_DEFAULT]);
     return { ok: true, added: id, group: cart };
   } catch (e) {
     Logger.log('ticket todo write failed: ' + e);
@@ -668,8 +668,10 @@ function importRosterNotes_() {
           continue;
         }
         if (todoAlreadyHas_(todos, sn, note)) continue;
-        sh.appendRow([id, label, false, sh.getLastRow(), new Date(), tab.getName()]);
-        todos.push({ id: id, text: label, done: false, group: tab.getName() });
+        sh.appendRow([id, label, false, sh.getLastRow(), new Date(), tab.getName(),
+                      TODO_STATUS_DEFAULT]);
+        todos.push({ id: id, text: label, done: false, group: tab.getName(),
+                     status: TODO_STATUS_DEFAULT });
         added++;
       }
     }
@@ -1183,7 +1185,11 @@ function testRosterNote() {
 // Group is the cart/section the task belongs to (e.g. "Cart O"); the dashboard
 // shows each group as a collapsible section. Blank group shows as "General".
 var TODO_SHEET_NAME = 'Todos';
-var TODO_HEADERS = ['ID', 'Text', 'Done', 'Order', 'Created', 'Group'];
+var TODO_HEADERS = ['ID', 'Text', 'Done', 'Order', 'Created', 'Group', 'Status'];
+
+// How far along a task is. Everything starts at the first one.
+var TODO_STATUSES = ['Untouched', 'Noticed', 'Working', 'Stalled', 'Progressing', 'Complete'];
+var TODO_STATUS_DEFAULT = 'Untouched';
 
 function todoSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1198,6 +1204,10 @@ function todoSheet_() {
   if (sh.getRange(1, 6).getValue() !== 'Group') {
     sh.getRange(1, 6).setValue('Group').setFontWeight('bold');
   }
+  // ...and no Status column.
+  if (sh.getRange(1, 7).getValue() !== 'Status') {
+    sh.getRange(1, 7).setValue('Status').setFontWeight('bold');
+  }
   return sh;
 }
 
@@ -1211,9 +1221,11 @@ function todoList_() {
     if (!r[0]) return;
     var done = false;
     if (r[2] === true || r[2] === 'TRUE') done = true;
+    var status = String(r[6] || '').trim();
+    if (TODO_STATUSES.indexOf(status) < 0) status = TODO_STATUS_DEFAULT;
     todos.push({
       id: String(r[0]), text: String(r[1]), done: done,
-      order: Number(r[3]) || 0, group: String(r[5] || '')
+      order: Number(r[3]) || 0, group: String(r[5] || ''), status: status
     });
   });
   todos.sort(function (a, b) { return a.order - b.order; });
@@ -1236,7 +1248,8 @@ function todoAdd_(p) {
   var sh = todoSheet_();
   var id = String(new Date().getTime());
   var order = sh.getLastRow();   // new items go to the bottom
-  sh.appendRow([id, text, false, order, new Date(), String(p.group || '').trim()]);
+  sh.appendRow([id, text, false, order, new Date(), String(p.group || '').trim(),
+                TODO_STATUS_DEFAULT]);
   return { ok: true, id: id };
 }
 
@@ -1247,6 +1260,11 @@ function todoUpdate_(p) {
   if (p.text != null) sh.getRange(row, 2).setValue(String(p.text));
   if (p.done != null) sh.getRange(row, 3).setValue(String(p.done) === 'true');
   if (p.group != null) sh.getRange(row, 6).setValue(String(p.group).trim());
+  if (p.status != null) {
+    var st = String(p.status).trim();
+    if (TODO_STATUSES.indexOf(st) < 0) st = TODO_STATUS_DEFAULT;
+    sh.getRange(row, 7).setValue(st);
+  }
   return { ok: true };
 }
 
