@@ -623,6 +623,13 @@ function importRosterNotes_() {
   var added = 0;
   var refreshed = 0;
   var seen = 0;
+  var suppressed = 0;
+  // Notes already dealt with: ticked off, or the item deleted. They stay in the
+  // workbook until somebody removes them by hand, so without this every refresh
+  // would put the item straight back.
+  var handled = {};
+  var handledList = handledNotes_();
+  for (var q = 0; q < handledList.length; q++) handled[handledList[q]] = true;
   var todos = todoList_().todos;
   var sh = todoSheet_();
   var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
@@ -652,6 +659,10 @@ function importRosterNotes_() {
         var colHead = String(heads2[noteCols[k] - 1] || '').trim();
         if (colHead && note.toLowerCase() === colHead.toLowerCase()) continue;   // repeated header
         seen++;
+        if (handled[noteKey_(sn, note)]) {          // already dealt with
+          suppressed++;
+          continue;
+        }
         var where = tab.getName();
         if (cbNo) where += ' #' + cbNo;
         Logger.log(where + ' | ' + sn + ' | ' + note);
@@ -677,7 +688,8 @@ function importRosterNotes_() {
     }
   }
   Logger.log('roster notes found: ' + seen + ', new items added: ' + added +
-             ', existing items updated: ' + refreshed);
+             ', existing items updated: ' + refreshed +
+             ', already dealt with: ' + suppressed);
   return added;
 }
 
