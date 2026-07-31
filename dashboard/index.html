@@ -145,6 +145,10 @@
                   display:flex; align-items:center; justify-content:center;
                   user-select:none; -webkit-user-select:none; }
   .pending-meta { font-size:11.5px; color:var(--red); opacity:.85; margin-top:3px; }
+  .pill-todo { display:inline-block; font-size:11.5px; font-weight:600; padding:2px 8px;
+               border-radius:999px; background:rgba(210,50,40,.15); color:var(--red); white-space:nowrap; }
+  .pill-done { display:inline-block; font-size:11.5px; font-weight:600; padding:2px 8px;
+               border-radius:999px; background:rgba(40,160,100,.15); color:var(--green); white-space:nowrap; }
   .cart-card .pending-badge { display:inline-block; margin-left:6px; font-size:11px;
                               font-weight:700; padding:1px 7px; border-radius:999px;
                               background:var(--red); color:#fff; }
@@ -258,6 +262,7 @@
         <select id="todoSort">
           <option value="cart">Sort: cart order</option>
           <option value="most">Sort: most to-do first</option>
+          <option value="closed">Show: closed in the last 7 days</option>
         </select>
         <button class="btn" id="notesToClearBtn"
                 title="Notes finished with, that are still written in the master workbook">Notes to clear</button>
@@ -277,6 +282,7 @@
           <button class="btn primary" id="todoAddBtn">Add</button>
         </div>
       </div>
+      <div id="closedHistory" class="hidden" style="margin:24px 0 0"></div>
       <div id="notesToClear" class="hidden" style="margin:24px 0 0"></div>
     </div>
   </div>
@@ -11024,10 +11030,72 @@ var todoSortMode = 'cart';
 try { todoSortMode = localStorage.getItem(SORT_KEY) || 'cart'; } catch (e) { todoSortMode = 'cart'; }
 document.getElementById('todoSort').value = todoSortMode;
 document.getElementById('todoSort').addEventListener('change', function () {
+  if (this.value === 'closed') {          // a view, not a sort: leave the order alone
+    this.value = todoSortMode;            // put the control back on the live sort
+    showClosedHistory();
+    return;
+  }
   todoSortMode = this.value;
   try { localStorage.setItem(SORT_KEY, todoSortMode); } catch (e) {}
+  document.getElementById('closedHistory').classList.add('hidden');
   renderTodos();
 });
+
+// Everything closed in the last week, listed under the carts. Rows whose note
+// is still written in the master workbook are flagged red -- those are the ones
+// that still need deleting there.
+function showClosedHistory() {
+  var box = document.getElementById('closedHistory');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="empty">Reading the closed log…</div>';
+  jsonp({ action: 'notesToClear', token: token }, 60000).then(function (res) {
+    if (!res || res.ok === false) {
+      box.innerHTML = '<div class="empty">Could not load: ' +
+                      esc((res && res.error) || 'unknown error') + '</div>';
+      return;
+    }
+    pendingNotes = res.notes || [];
+    renderTodos();
+    var history = res.history || [];
+    if (!history.length) {
+      box.innerHTML = '<div class="tp-head"><h3>Closed in the last 7 days</h3>' +
+        '<span style="flex:1"></span><button class="btn" id="closedCloseBtn">✕ Close</button></div>' +
+        '<div class="empty">Nothing has been closed in the last 7 days.</div>';
+      wireClosedClose(box);
+      return;
+    }
+    // which of these are still sitting in the master?
+    var stillThere = {};
+    for (var i = 0; i < pendingNotes.length; i++) {
+      stillThere[pendingNotes[i].sn + '|' + pendingNotes[i].note] = pendingNotes[i].cell;
+    }
+    var rows = history.map(function (h) {
+      var cell = stillThere[h.sn + '|' + h.note];
+      var state = '<span class="pill-done">cleared</span>';
+      if (cell) state = '<span class="pill-todo">still in master · ' + esc(cell) + '</span>';
+      var when = new Date(h.closedAt);
+      return '<tr><td>' + esc(when.toLocaleDateString()) + ' ' +
+             esc(when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) + '</td>' +
+             '<td>' + esc(h.cart) + '</td><td>' + esc(h.note) + '</td>' +
+             '<td>' + esc(h.sn) + '</td><td>' + esc(h.how) + '</td><td>' + state + '</td></tr>';
+    }).join('');
+    box.innerHTML =
+      '<div class="tp-head"><h3>Closed in the last 7 days (' + history.length + ')</h3>' +
+      '<span style="flex:1"></span><button class="btn" id="closedCloseBtn">✕ Close</button></div>' +
+      '<div class="tablewrap"><table><thead><tr><th>Closed</th><th>Cart</th><th>Note</th>' +
+      '<th>S/N</th><th>How</th><th>In the master</th></tr></thead><tbody>' + rows +
+      '</tbody></table></div>';
+    wireClosedClose(box);
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }).catch(function (err) {
+    box.innerHTML = '<div class="empty">Could not load: ' + esc(err.message) + '</div>';
+  });
+}
+
+function wireClosedClose(box) {
+  var btn = document.getElementById('closedCloseBtn');
+  if (btn) btn.onclick = function () { box.classList.add('hidden'); box.innerHTML = ''; };
+}
 
 function groupOf(t) {
   if (t.group) return t.group;
