@@ -1245,12 +1245,38 @@ function todoUpdate_(p) {
   return { ok: true };
 }
 
+// Deleting an item that came from a roster note counts as dealing with it:
+// the note is remembered so the next import does not bring the item straight
+// back, and it turns up in the "notes to clear" report instead. Items from a
+// ticket are not suppressed -- an open ticket belongs on the list, and its item
+// returns until the ticket is marked Resolved.
 function todoDelete_(p) {
   var sh = todoSheet_();
   var row = todoFindRow_(sh, p.id);
   if (!row) return { ok: false, error: 'not found' };
+  var id = String(p.id);
+  var suppressed = false;
+  if (id.indexOf('roster-') === 0) {
+    try {
+      var todo = {
+        id: id,
+        text: String(sh.getRange(row, 2).getValue() || ''),
+        group: String(sh.getRange(row, 6).getValue() || '')
+      };
+      var src = rosterTodoSource_(todo);
+      if (src) {
+        var cur = String(src.sheet.getRange(src.row, src.col).getValue() || '').trim();
+        if (cur) {
+          markNoteHandled_(src.sn, cur);
+          suppressed = true;
+        }
+      }
+    } catch (e) {
+      Logger.log('could not suppress note for ' + id + ': ' + e);
+    }
+  }
   sh.deleteRow(row);
-  return { ok: true };
+  return { ok: true, suppressed: suppressed };
 }
 
 // ids arrives as a comma-separated list in the new display order.

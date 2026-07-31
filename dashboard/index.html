@@ -11273,7 +11273,20 @@ document.getElementById('todoList').addEventListener('click', function (e) {
   } else if (e.target.classList.contains('todo-edit')) {
     startTodoEdit(li, t);
   } else if (e.target.classList.contains('todo-del')) {
-    if (!confirm('Delete this to-do?\n\n' + t.text)) return;
+    // What deleting means depends on where the item came from.
+    var id = String(t.id);
+    var question = 'Delete this to-do?\n\n' + t.text;
+    if (id.indexOf('roster-') === 0) {
+      question = 'Delete this item?\n\n' + t.text +
+        '\n\nIt came from a note in the workbook. The note stays where it is, but ' +
+        'it will not come back onto this list, and it will be listed under ' +
+        '"Notes to clear" so you can delete it from the master workbook.';
+    } else if (id.indexOf('ticket-') === 0) {
+      question = 'Delete this item?\n\n' + t.text +
+        '\n\nIt came from an open ticket, so it will reappear at the next refresh. ' +
+        'To close it for good, mark the ticket Resolved on the Tickets tab.';
+    }
+    if (!confirm(question)) return;
     todos = todos.filter(function (x) { return x.id !== t.id; });
     renderTodos();
     todoSave({ action: 'todoDelete', id: t.id }, 'Delete failed');
