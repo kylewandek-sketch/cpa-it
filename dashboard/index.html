@@ -135,6 +135,19 @@
   .todo-item.dragging { opacity:.4; }
   .todo-item .handle { cursor:grab; color:var(--muted); font-size:15px; padding-top:1px;
                        user-select:none; -webkit-user-select:none; }
+  /* task text stays selectable so a serial can be copied for Lookup */
+  .todo-item .txt { user-select:text; -webkit-user-select:text; cursor:text; }
+  /* closed here, still written in the master workbook */
+  .todo-item.pending { background:rgba(210,50,40,.09); border-color:rgba(210,50,40,.45); }
+  .todo-item.pending .txt { color:var(--red); }
+  .pending-flag { flex:none; width:18px; height:18px; border-radius:50%; margin-top:1px;
+                  background:var(--red); color:#fff; font-size:12px; font-weight:700;
+                  display:flex; align-items:center; justify-content:center;
+                  user-select:none; -webkit-user-select:none; }
+  .pending-meta { font-size:11.5px; color:var(--red); opacity:.85; margin-top:3px; }
+  .cart-card .pending-badge { display:inline-block; margin-left:6px; font-size:11px;
+                              font-weight:700; padding:1px 7px; border-radius:999px;
+                              background:var(--red); color:#fff; }
   .todo-item input[type=checkbox] { margin-top:3px; width:16px; height:16px; flex-shrink:0; }
   .todo-item .txt { flex:1; font-size:14px; line-height:1.45; word-break:break-word; padding-top:1px; }
   .todo-item.done .txt { text-decoration:line-through; color:var(--muted); }
@@ -10478,6 +10491,7 @@ function refreshTodosNow() {
     }
     todos = res.todos || todos;
     renderTodos();
+    loadPendingNotes();
     var bits = [];
     if (res.added) bits.push(res.added + ' note(s) added');
     if (res.dropped) bits.push(res.dropped + ' cleared');
@@ -10974,6 +10988,7 @@ function loadTodos() {
     if (!res || res.ok === false) { toast('Could not load to-dos'); return; }
     todos = res.todos || [];
     renderTodos();
+    loadPendingNotes();
   }).catch(function (err) {
     todosLoading = false;
     toast('To-do load failed: ' + err.message);
@@ -11037,22 +11052,59 @@ function buildTodoItem(t) {
   li.className = 'todo-item';
   if (t.done) li.className = 'todo-item done';
   li.setAttribute('data-id', t.id);
-  li.setAttribute('draggable', 'true');
+  li.setAttribute('draggable', 'false');   // turned on only when the handle is grabbed
   li.innerHTML =
     '<span class="handle" title="Drag to reorder">⠿</span>' +
-    '<input type="checkbox" class="todo-check" title="Mark done">' +
     '<div class="txt">' + esc(t.text) + '</div>' +
     '<div class="acts">' +
       todoStatusSelect(t) +
       '<button class="todo-del" title="Delete">✕</button>' +
     '</div>';
-  li.querySelector('.todo-check').checked = t.done;
   return li;
 }
 
 // How far along a task is. Everything starts Untouched; picking Complete asks
 // whether to remove the task for good.
 var TODO_STATUSES = ['Untouched', 'Noticed', 'Working', 'Stalled', 'Progressing', 'Complete'];
+
+// Notes whose task has been closed but whose text is still in the master
+// workbook. They are not tasks any more -- they are cells somebody has to
+// delete -- so they show in the cart panel shaded red.
+var pendingNotes = [];
+
+function loadPendingNotes() {
+  jsonp({ action: 'notesToClear', token: token }).then(function (res) {
+    if (!res || res.ok === false) return;
+    pendingNotes = res.notes || [];
+    renderTodos();
+  }).catch(function () {});
+}
+
+function pendingForCart(cart) {
+  return pendingNotes.filter(function (n) { return n.cart === cart; });
+}
+
+function waitedSince(iso) {
+  if (!iso) return '';
+  var days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  if (days <= 0) return 'closed today';
+  if (days === 1) return 'closed yesterday';
+  return 'closed ' + days + ' days ago';
+}
+
+function buildPendingItem(n) {
+  var li = document.createElement('li');
+  li.className = 'todo-item pending';
+  var meta = 'delete ' + esc(n.cell) + ' in the master';
+  var waited = waitedSince(n.closedAt);
+  if (waited) meta += ' · ' + esc(waited);
+  li.innerHTML =
+    '<span class="pending-flag" title="Closed here, still written in the master workbook">!</span>' +
+    '<div class="txt">' + esc(n.note) +
+      '<div class="pending-meta">' + meta + '</div>' +
+    '</div>';
+  return li;
+}
 
 function todoStatusSelect(t) {
   var cur = t.status;
@@ -11084,7 +11136,7 @@ function renderCartGrid() {
     // Highest open count first; ties keep cart order.
     var openCount = {};
     names.forEach(function (g) {
-      openCount[g] = groupItems(g).filter(function (t) { return !t.done; }).length;
+      openCount[g] = groupItems(g).length;
     });
     var indexed = names.map(function (g, i) { return { g: g, i: i }; });
     indexed.sort(function (a, b) {
@@ -11095,23 +11147,24 @@ function renderCartGrid() {
   }
   names.forEach(function (g) {
     var items = groupItems(g);
-    var open = items.filter(function (t) { return !t.done; }).length;
+    var open = items.length;
 
     var card = document.createElement('div');
     card.className = 'cart-card';
     card.setAttribute('data-group', g);
     if (g === selectedGroup) card.classList.add('active');
 
+    var pendingHere = pendingForCart(g).length;
     var count;
     if (items.length === 0) {
       card.classList.add('empty');
       count = '0 items';
-    } else if (open === 0) {
-      card.classList.add('alldone');
-      count = '✓ all done (' + items.length + ')';
     } else {
       count = '<b>' + open + '</b> to-do';
-      if (open < items.length) count += ' · ' + (items.length - open) + ' done';
+    }
+    if (pendingHere > 0) {
+      count += '<span class="pending-badge" title="Notes to delete from the master workbook">' +
+               pendingHere + ' to clear</span>';
     }
     card.innerHTML =
       '<div class="cname">' + esc(g) + '</div>' +
@@ -11133,16 +11186,21 @@ function renderPanel() {
   panel.classList.remove('hidden');
 
   var items = groupItems(selectedGroup);
-  var doneCount = items.filter(function (t) { return t.done; }).length;
   document.getElementById('tpName').textContent = selectedGroup;
-  document.getElementById('tpCount').textContent = doneCount + ' of ' + items.length + ' done';
+  var label = items.length + ' task';
+  if (items.length !== 1) label += 's';
+  document.getElementById('tpCount').textContent = label;
 
   var ul = document.getElementById('todoList');
   ul.innerHTML = '';
   items.forEach(function (t) { ul.appendChild(buildTodoItem(t)); });
 
+  // closed here, still sitting in the master workbook
+  var pending = pendingForCart(selectedGroup);
+  pending.forEach(function (n) { ul.appendChild(buildPendingItem(n)); });
+
   var empty = document.getElementById('tpEmpty');
-  if (items.length > 0) empty.classList.add('hidden');
+  if (items.length > 0 || pending.length > 0) empty.classList.add('hidden');
   else empty.classList.remove('hidden');
 }
 
@@ -11233,13 +11291,14 @@ document.getElementById('notesToClearBtn').addEventListener('click', function ()
     }
     var rows = res.notes.map(function (n) {
       return '<tr><td>' + esc(n.cart) + '</td><td>' + esc(n.cell) + '</td><td>' +
-             esc(n.sn) + '</td><td>' + esc(n.note) + '</td></tr>';
+             esc(n.sn) + '</td><td>' + esc(n.note) + '</td><td>' +
+             esc(waitedSince(n.closedAt)) + '</td></tr>';
     }).join('');
     box.innerHTML =
       '<div class="tp-head"><h3>' + res.notes.length + ' note(s) to delete from the master workbook</h3>' +
       '<span style="flex:1"></span><button class="btn" id="notesCopyBtn">Copy list</button>' +
       '<button class="btn" id="notesCloseBtn">✕ Close</button></div>' +
-      '<div class="tablewrap"><table><thead><tr><th>Cart</th><th>Cell</th><th>S/N</th><th>Note</th></tr></thead>' +
+      '<div class="tablewrap"><table><thead><tr><th>Cart</th><th>Cell</th><th>S/N</th><th>Note</th><th>Closed</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div>';
     document.getElementById('notesCloseBtn').onclick = function () {
       box.classList.add('hidden');
@@ -11248,7 +11307,7 @@ document.getElementById('notesToClearBtn').addEventListener('click', function ()
     box.scrollIntoView({ behavior: 'smooth', block: 'start' });   // it sits at the bottom
     document.getElementById('notesCopyBtn').onclick = function () {
       var text = res.notes.map(function (n) {
-        return n.cart + '\t' + n.cell + '\t' + n.sn + '\t' + n.note;
+        return n.cart + '\t' + n.cell + '\t' + n.sn + '\t' + n.note + '\t' + waitedSince(n.closedAt);
       }).join('\n');
       navigator.clipboard.writeText(text).then(function () { toast('List copied'); },
                                                function () { toast('Copy failed'); });
@@ -11268,11 +11327,7 @@ document.getElementById('todoList').addEventListener('click', function (e) {
   if (e.target.classList.contains('todo-status')) {
     return;                       // handled by the change listener below
   }
-  if (e.target.classList.contains('todo-check')) {
-    t.done = e.target.checked;       // optimistic
-    renderTodos();
-    todoSave({ action: 'todoUpdate', id: t.id, done: t.done }, 'Save failed');
-  } else if (e.target.classList.contains('todo-del')) {
+  if (e.target.classList.contains('todo-del')) {
     // What deleting means depends on where the item came from.
     var id = String(t.id);
     var question = 'Delete this to-do?\n\n' + t.text;
@@ -11290,6 +11345,7 @@ document.getElementById('todoList').addEventListener('click', function (e) {
     todos = todos.filter(function (x) { return x.id !== t.id; });
     renderTodos();
     todoSave({ action: 'todoDelete', id: t.id }, 'Delete failed');
+    setTimeout(loadPendingNotes, 800);
   }
 });
 
@@ -11324,6 +11380,7 @@ document.getElementById('todoList').addEventListener('change', function (e) {
     todos = todos.filter(function (x) { return x.id !== t.id; });
     renderTodos();
     todoSave({ action: 'todoDelete', id: t.id }, 'Delete failed');
+    setTimeout(loadPendingNotes, 800);          // it should now want clearing
     return;
   }
   t.status = 'Progressing';                 // not complete after all
@@ -11334,6 +11391,19 @@ document.getElementById('todoList').addEventListener('change', function (e) {
 
 // Drag to reorder.
 var dragLi = null;
+// Dragging is armed by the handle only, so the rest of the row can be selected
+// and copied -- picking a serial out of a task for Lookup.
+document.getElementById('todoList').addEventListener('mousedown', function (e) {
+  var li = e.target.closest('.todo-item');
+  if (!li) return;
+  if (e.target.closest('.handle')) li.setAttribute('draggable', 'true');
+  else li.setAttribute('draggable', 'false');
+});
+document.getElementById('todoList').addEventListener('dragend', function (e) {
+  var li = e.target.closest('.todo-item');
+  if (li) li.setAttribute('draggable', 'false');
+});
+
 document.getElementById('todoList').addEventListener('dragstart', function (e) {
   dragLi = e.target.closest('.todo-item');
   if (dragLi) dragLi.classList.add('dragging');

@@ -726,6 +726,72 @@ function clearHandledNotes() {
   Logger.log('handled-note list cleared');
 }
 
+// ---- Closed log -------------------------------------------------------------
+// What was closed and when, kept for a week. Used to show which notes are still
+// waiting to be deleted from the master workbook, and how long they have waited.
+var CLOSED_LOG_SHEET = 'ClosedLog';
+var CLOSED_LOG_HEADERS = ['Closed At', 'Item ID', 'Note', 'S/N', 'Cart', 'How'];
+var CLOSED_LOG_DAYS = 7;
+
+function closedLogSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(CLOSED_LOG_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(CLOSED_LOG_SHEET, ss.getNumSheets());
+    sh.getRange(1, 1, 1, CLOSED_LOG_HEADERS.length).setValues([CLOSED_LOG_HEADERS]);
+    sh.getRange(1, 1, 1, CLOSED_LOG_HEADERS.length).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+// Drop anything older than a week, so the log stays a working list.
+function closedLogPrune_(sh) {
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return;
+  var cutoff = new Date().getTime() - CLOSED_LOG_DAYS * 86400000;
+  var when = sh.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = when.length - 1; i >= 0; i--) {
+    var t = new Date(when[i][0]).getTime();
+    if (!t || t < cutoff) sh.deleteRow(i + 2);
+  }
+}
+
+function logClosed_(id, note, sn, cart, how) {
+  try {
+    var sh = closedLogSheet_();
+    closedLogPrune_(sh);
+    sh.appendRow([new Date(), String(id || ''), String(note || ''),
+                  String(sn || ''), String(cart || ''), String(how || '')]);
+  } catch (e) {
+    Logger.log('closed log write failed: ' + e);
+  }
+}
+
+// Everything closed in the last week, newest first.
+function closedHistory_() {
+  var out = [];
+  try {
+    var sh = closedLogSheet_();
+    closedLogPrune_(sh);
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return out;
+    var v = sh.getRange(2, 1, lastRow - 1, CLOSED_LOG_HEADERS.length).getValues();
+    for (var i = 0; i < v.length; i++) {
+      if (!v[i][0]) continue;
+      out.push({
+        closedAt: new Date(v[i][0]).toISOString(),
+        id: String(v[i][1]), note: String(v[i][2]),
+        sn: String(v[i][3]), cart: String(v[i][4]), how: String(v[i][5])
+      });
+    }
+    out.sort(function (a, b) { return String(b.closedAt).localeCompare(String(a.closedAt)); });
+  } catch (e) {
+    Logger.log('closed history read failed: ' + e);
+  }
+  return out;
+}
+
 // Where a roster-sourced to-do came from: id is roster-<serial>-<column>, and
 // the cart tab is the item's group.
 function rosterTodoSource_(todo) {
@@ -774,7 +840,10 @@ function reconcileRosterTodos_() {
       // The note itself is left alone -- the master workbook is not ours to
       // edit. It goes on the handled list so it is not imported again, and
       // shows up in the "notes to clear" report for someone to delete by hand.
-      if (cur) markNoteHandled_(src.sn, cur);
+      if (cur) {
+        markNoteHandled_(src.sn, cur);
+        logClosed_(todo.id, cur, src.sn, todo.group, 'ticked off');
+      }
       var doneRow = todoFindRow_(sh, todo.id);
       if (doneRow) { sh.deleteRow(doneRow); dropped++; }
       continue;
@@ -828,12 +897,24 @@ function notesToClear_() {
           cart: tab.getName(),
           sn: sn,
           note: note,
-          cell: tab.getRange(r + 3, noteCols[k]).getA1Notation()
+          cell: tab.getRange(r + 3, noteCols[k]).getA1Notation(),
+          key: noteKey_(sn, note)
         });
       }
     }
   }
-  return { ok: true, notes: out };
+  // Pair each one with when it was closed, so the report can say how long it
+  // has been waiting.
+  var history = closedHistory_();
+  var when = {};
+  for (var h = 0; h < history.length; h++) {
+    var k = noteKey_(history[h].sn, history[h].note);
+    if (!when[k]) when[k] = history[h].closedAt;      // history is newest first
+  }
+  for (var n = 0; n < out.length; n++) {
+    if (when[out[n].key]) out[n].closedAt = when[out[n].key];
+  }
+  return { ok: true, notes: out, history: history };
 }
 
 // Clears out roster items that were never really notes -- an earlier import
@@ -1303,6 +1384,7 @@ function todoDelete_(p) {
         var cur = String(src.sheet.getRange(src.row, src.col).getValue() || '').trim();
         if (cur) {
           markNoteHandled_(src.sn, cur);
+          logClosed_(id, cur, src.sn, todo.group, 'removed from the list');
           suppressed = true;
         }
       }
