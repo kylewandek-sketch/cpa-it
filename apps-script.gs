@@ -28,8 +28,11 @@ var TODO_GROUP_FALLBACK = 'Unassigned';
 
 // The school-account master workbook. Read-only source for the mirror; nothing
 // is ever written back to it.
+// This is the workbook the cart notes are typed into.
 //   1z1W54tWIvm4XlaqsEbyN4slO2HNCD4FO = "Start of Year ... Check.xlsx" (in use)
 //   1phWbiNeULgv0KVErXiodIoAPp_5FWPnL = "2026-2027 Chromebook Carts/Ipads.xlsx"
+//     -- the assignment roster; holds students, HS carts and the iPad lists,
+//        but not the damage notes
 var MASTER_XLSX_ID = '1z1W54tWIvm4XlaqsEbyN4slO2HNCD4FO';
 
 // Full column layout. A = Chromebook S/N. Status=9, Notes=10 (unchanged); new cols appended.
@@ -1091,8 +1094,10 @@ var TODO_REFRESH_HOURS = [7, 9, 12, 15];        // school time zone, see setupTo
 function scheduledTodoRefresh() {
   var sync = syncMirror_(false);                // no-op when the master is unchanged
   var added = importRosterNotes_();
+  var dropped = reconcileRosterTodos_();        // notes deleted or reworded in the workbook
   rebuildTicketTodos();
-  Logger.log('scheduled refresh done. sync: ' + JSON.stringify(sync) + ', notes imported: ' + added);
+  Logger.log('scheduled refresh done. sync: ' + JSON.stringify(sync) +
+             ', notes imported: ' + added + ', items removed: ' + dropped);
 }
 
 // Run once to install the four daily triggers. Running it again just replaces
@@ -1290,9 +1295,6 @@ function todoReorder_(p) {
   return { ok: true };
 }
 
-// RUN THIS from the editor if your Todos tab still has the old ungrouped items:
-// it DELETES the whole Todos tab (all items and checkmarks, including any you
-// added yourself) and reloads the cross-reference findings grouped by cart.
 // ---- Photos ----
 // RUN THIS ONCE from the editor: it triggers the Drive authorization prompt and
 // verifies the script can actually write to PHOTO_FOLDER_ID. Check the log/result.
