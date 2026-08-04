@@ -956,7 +956,8 @@ function refreshTodos_() {
   var list = todoList_();
   return { ok: true, added: res.added, dropped: res.removed,
            imported: res.imported, kept: res.kept,
-           sync: sync, todos: list.todos, hidden: list.hidden };
+           sync: sync, todos: list.todos, hidden: list.hidden,
+           carts: rosterCartTabs_() };
 }
 
 // ---- Full rebuild of the roster-sourced to-dos ------------------------------
@@ -967,9 +968,16 @@ function refreshTodos_() {
 // the old name, and the item could never be cleared again. Same story if a
 // device moved carts.
 //
-// Rebuilding sidesteps all of it: the roster part of the list is only ever what
-// the master says now. Hand-typed items (ids that are plain numbers) are left
-// alone, and ticket- items are rebuilt by rebuildTicketTodos().
+// Rebuilding sidesteps all of it: the list is only ever what the master says
+// now. The sheet is a mirror of the master, not a place things are kept.
+//
+// The ONLY rows carried over are ticket- items, which rebuildTicketTodos()
+// maintains from the ticket sheet; dropping them here would just have that
+// function write them straight back with fresh timestamps. Everything else is
+// rebuilt from the master, so a row typed into the sheet by hand does not
+// survive a refresh. That is deliberate -- the dashboard's Add box was removed
+// when this became a pure mirror on 2026-08-04, so nothing offers to create a
+// row that would then be discarded.
 //
 // Status and Done are carried across on a key of serial + note text, which
 // survives the note moving tab or column -- a rebuild should not throw away
@@ -994,7 +1002,7 @@ function rebuildRosterTodos_() {
   var width = TODO_HEADERS.length;
 
   // ---- 1. read the sheet as it stands, raw, so Created survives ----
-  var keep = [];        // hand-typed and ticket- rows, untouched
+  var keep = [];        // ticket- rows only; everything else is rebuilt
   var before = {};      // state key -> { done, status }
   var beforeKeys = {};
   var lastRow = sh.getLastRow();
@@ -1003,10 +1011,11 @@ function rebuildRosterTodos_() {
     for (var i = 0; i < rows.length; i++) {
       var id = String(rows[i][0] || '');
       if (!id) continue;
-      if (id.indexOf('roster-') !== 0) {
-        keep.push(rows[i]);                       // not ours to rebuild
+      if (id.indexOf('ticket-') === 0) {
+        keep.push(rows[i]);                       // rebuildTicketTodos_ owns these
         continue;
       }
+      if (id.indexOf('roster-') !== 0) continue;  // stray row: not from the master, dropped
       var sn = todoIdSerial_(id);
       if (!sn) continue;
       var st = String(rows[i][6] || '').trim();
@@ -1107,9 +1116,89 @@ function rebuildRosterTodos_() {
   for (var kb in beforeKeys) { if (!afterKeys[kb]) removed++; }
 
   Logger.log('todo rebuild: ' + fresh.length + ' roster item(s) from the master, ' +
-             keep.length + ' hand-typed/ticket item(s) kept, ' +
+             keep.length + ' ticket item(s) kept, ' +
              added + ' new, ' + removed + ' gone');
   return { imported: fresh.length, kept: keep.length, added: added, removed: removed };
+}
+
+// Which carts actually exist, by name, straight off the mirror. The dashboard
+// draws its grid from this instead of a hardcoded list, so a tile whose tab has
+// been renamed or deleted stops being drawn, and a tab added to the master
+// turns up on its own.
+//
+// Deliberately NOT done by auto-hiding the missing ones: hiddenTodoGroups is
+// permanent, so a cart auto-hidden today would stay suppressed if a tab of the
+// same name were created later. This list is recomputed every time instead.
+//
+// Hidden carts are included here -- the dashboard subtracts them itself, and
+// needs the names to offer them back.
+function rosterCartTabs_() {
+  var names = [];
+  try {
+    var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
+    var tabs = ss.getSheets();
+    for (var i = 0; i < tabs.length; i++) {
+      var tab = tabs[i];
+      if (mirrorIsProtectedTab_(tab.getName())) continue;
+      if (!rosterSerialColumn_(tab)) continue;      // not a roster tab
+      names.push(tab.getName());
+    }
+  } catch (e) {
+    Logger.log('could not list cart tabs: ' + e);
+  }
+  return names;
+}
+
+// Diagnostic. Lists every tab in the mirror in workbook order and says whether
+// the to-do code can see it, so a tab that is missing from the dashboard can be
+// told apart from one that is there but laid out differently.
+//
+// Run it from the editor and read View > Execution log. Sync the mirror first
+// (syncMirrorNow) if the master has changed since the last refresh.
+function listCartTabs() {
+  var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
+  var tabs = ss.getSheets();
+  var seen = 0;
+  Logger.log(tabs.length + ' tab(s) in the mirror, in workbook order:');
+  Logger.log('');
+  for (var i = 0; i < tabs.length; i++) {
+    var tab = tabs[i];
+    var name = tab.getName();
+    if (mirrorIsProtectedTab_(name)) {
+      Logger.log(pad_(i + 1) + name + '  -- skipped (ticket/todo tab, not roster)');
+      continue;
+    }
+    var snCol = rosterSerialColumn_(tab);
+    if (!snCol) {
+      // Show what is actually on rows 1 and 2, so a different layout is obvious.
+      var lc = Math.min(tab.getLastColumn(), 8);
+      var r1 = lc ? tab.getRange(1, 1, 1, lc).getValues()[0].join(' | ') : '';
+      var r2 = lc ? tab.getRange(2, 1, 1, lc).getValues()[0].join(' | ') : '';
+      Logger.log(pad_(i + 1) + name + '  -- NOT DETECTED (no "serial" header on row 2)');
+      Logger.log('        row1: ' + r1);
+      Logger.log('        row2: ' + r2);
+      continue;
+    }
+    seen++;
+    var noteCols = rosterNoteColumns_(tab);
+    var numCol = rosterNumberColumn_(tab);
+    var rows = Math.max(0, tab.getLastRow() - 2);
+    Logger.log(pad_(i + 1) + name + '  -- ok: serial=col' + snCol +
+               ', number=col' + numCol +
+               ', notes=col' + (noteCols.length ? noteCols.join('/') : 'NONE') +
+               ', ' + rows + ' data row(s)' +
+               (isHiddenGroup_(name) ? '   [HIDDEN on the dashboard]' : ''));
+  }
+  Logger.log('');
+  Logger.log(seen + ' tab(s) will show as carts. Hidden: ' +
+             (hiddenGroups_().join(', ') || 'none'));
+  return seen;
+}
+
+function pad_(n) {
+  var s = String(n);
+  while (s.length < 3) s = ' ' + s;
+  return s + '. ';
 }
 
 // Run by hand in the editor to rebuild without going through the dashboard.
@@ -1494,7 +1583,7 @@ function todoList_() {
     });
   });
   todos.sort(function (a, b) { return a.order - b.order; });
-  return { ok: true, todos: todos, hidden: hiddenGroups_() };
+  return { ok: true, todos: todos, hidden: hiddenGroups_(), carts: rosterCartTabs_() };
 }
 
 function todoFindRow_(sh, id) {
@@ -1618,7 +1707,7 @@ function isHiddenGroup_(name) {
 
 // Remember the name so the tab is not imported again. Writes nothing to the
 // Todos sheet -- the cart's rows stop being re-created by the next rebuild, and
-// anything hand-typed stays put.
+// anything added from the dashboard stays put.
 function todoHideGroup_(p) {
   var name = String(p.group || '').trim();
   if (!name) return { ok: false, error: 'no group given' };

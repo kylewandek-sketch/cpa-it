@@ -117,8 +117,6 @@
   .cart-card .ccount b { color:var(--red); font-size:16px; }
   .cart-card.empty .cname { color:var(--muted); font-weight:600; }
   .cart-card.alldone .ccount { color:var(--green); }
-  .cart-card.newgroup { border-style:dashed; }
-  .cart-card.newgroup .cname { color:var(--muted); font-weight:600; }
   /* Delete control, tucked in the corner of each tile. Kept invisible until the
      tile is hovered or focused so the grid stays calm, but always reachable by
      keyboard. */
@@ -138,9 +136,6 @@
   .tp-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
   .tp-head h3 { margin:0; font-size:16px; }
   .tp-head span { color:var(--muted); font-size:13px; }
-  .todo-add { display:flex; gap:8px; margin-top:12px; }
-  .todo-add input { flex:1; padding:9px 12px; border:1px solid var(--line); border-radius:8px;
-                    background:var(--page); color:var(--ink); font-size:14px; }
   .todo-ul { list-style:none; margin:0; padding:0; }
   .todo-status { font-size:12px; padding:4px 6px; border-radius:7px; border:1px solid var(--line);
                  background:var(--card); color:var(--ink); max-width:130px; }
@@ -291,11 +286,10 @@
           <button class="btn" id="tpClose">✕ Close</button>
         </div>
         <ul class="todo-ul" id="todoList"></ul>
-        <div id="tpEmpty" class="empty hidden">No tasks for this cart yet. Add one below.</div>
-        <div class="todo-add">
-          <input type="text" id="todoNew" placeholder="Add a task to this cart…">
-          <button class="btn primary" id="todoAddBtn">Add</button>
-        </div>
+        <div id="tpEmpty" class="empty hidden">Nothing outstanding for this cart.</div>
+        <!-- No "add a task" box: the list mirrors the master workbook, so a row
+             typed here would be dropped by the next refresh. Type the note into
+             the cart's tab in the master instead. -->
       </div>
       <div id="closedHistory" class="hidden" style="margin:24px 0 0"></div>
       <div id="notesToClear" class="hidden" style="margin:24px 0 0"></div>
@@ -10512,6 +10506,7 @@ function refreshTodosNow() {
     }
     todos = res.todos || todos;
     if (res.hidden) hiddenCarts = res.hidden;
+    if (res.carts) serverCarts = res.carts;   // tiles follow the master's tabs
     renderTodos();
     loadPendingNotes();
     var bits = [];
@@ -11065,6 +11060,7 @@ function loadTodos() {
     if (!res || res.ok === false) { toast('Could not load to-dos'); return; }
     todos = res.todos || [];
     if (res.hidden) hiddenCarts = res.hidden;
+    if (res.carts) serverCarts = res.carts;
     renderTodos();
     loadPendingNotes();
   }).catch(function (err) {
@@ -11094,7 +11090,6 @@ var CARTS = [
 var SEL_KEY = 'cpa_todo_sel';
 var selectedGroup = '';
 try { selectedGroup = localStorage.getItem(SEL_KEY) || ''; } catch (e) { selectedGroup = ''; }
-var extraGroups = [];   // custom groups created this session that have no tasks yet
 
 // Tile sort: 'cart' (roster order) or 'most' (most open to-dos first).
 var SORT_KEY = 'cpa_todo_sort';
@@ -11177,13 +11172,18 @@ function groupOf(t) {
 }
 
 // Roster carts first, then any group found in the data (iPads, Checks to finish, ...).
+// The carts the master workbook actually has, as reported by the script. Null
+// until the first reply comes back -- and on an older deployment that does not
+// send them, which is why CARTS stays as the fallback.
+var serverCarts = null;
+
 function allGroups() {
-  var names = CARTS.slice();
+  // A cart that is no longer a tab in the master stops being drawn. Groups that
+  // still hold items are always included, or their tasks would have nowhere to
+  // show; same for a group created here that has nothing in it yet.
+  var names = (serverCarts || CARTS).slice();
   todos.forEach(function (t) {
     var g = groupOf(t);
-    if (names.indexOf(g) < 0) names.push(g);
-  });
-  extraGroups.forEach(function (g) {
     if (names.indexOf(g) < 0) names.push(g);
   });
   return names.filter(function (g) { return !isHiddenCart(g); });
@@ -11339,12 +11339,9 @@ function renderCartGrid() {
     grid.appendChild(card);
   });
 
-  // Extra tile for starting a brand-new group (e.g. a project or new cart).
-  var add = document.createElement('div');
-  add.className = 'cart-card newgroup';
-  add.setAttribute('data-newgroup', '1');
-  add.innerHTML = '<div class="cname">＋ New group</div><div class="ccount">name it</div>';
-  grid.appendChild(add);
+  // No "new group" tile: the grid follows the master workbook's tabs, so a
+  // group invented here would vanish on the next refresh. Add the tab to the
+  // master instead and it turns up on its own.
 
   renderHiddenCarts();
 }
@@ -11424,17 +11421,6 @@ document.getElementById('cartGrid').addEventListener('click', function (e) {
   }
   var card = e.target.closest('.cart-card');
   if (!card) return;
-  if (card.getAttribute('data-newgroup')) {
-    var name = prompt('Name for the new group:');
-    if (!name) return;
-    name = name.trim();
-    if (!name) return;
-    if (extraGroups.indexOf(name) < 0) extraGroups.push(name);
-    selectedGroup = name;
-    try { localStorage.setItem(SEL_KEY, selectedGroup); } catch (err) {}
-    renderTodos();
-    return;
-  }
   selectGroup(card.getAttribute('data-group'));
 });
 
@@ -11458,8 +11444,6 @@ function deleteCart(g, btn) {
       return;
     }
     hiddenCarts = res.hidden || [];
-    var i = extraGroups.indexOf(g);
-    if (i >= 0) extraGroups.splice(i, 1);
     if (selectedGroup === g) {
       selectedGroup = '';
       try { localStorage.removeItem(SEL_KEY); } catch (err) {}
@@ -11483,28 +11467,10 @@ function todoSave(params, failMsg) {
   }).catch(function (err) { toast(failMsg + ': ' + err.message + ' — refresh'); });
 }
 
-function addTodo() {
-  if (!selectedGroup) { toast('Click a cart first'); return; }
-  var group = selectedGroup;
-  var inp = document.getElementById('todoNew');
-  var text = inp.value.trim();
-  if (!text) return;
-  var btn = document.getElementById('todoAddBtn');
-  btn.disabled = true;
-  jsonp({ action: 'todoAdd', token: token, text: text, group: group }).then(function (res) {
-    btn.disabled = false;
-    if (!res || res.ok === false) { toast('Add failed: ' + ((res && res.error) || 'error')); return; }
-    todos.push({ id: res.id, text: text, done: false, order: todos.length + 1, group: group });
-    inp.value = '';
-    renderTodos();
-    toast('Added to ' + group);
-  }).catch(function (err) { btn.disabled = false; toast('Add failed: ' + err.message); });
-}
-
-document.getElementById('todoAddBtn').onclick = addTodo;
-document.getElementById('todoNew').addEventListener('keydown', function (e) {
-  if (e.key === 'Enter') addTodo();
-});
+// Adding tasks from here was removed when the list became a pure mirror of the
+// master workbook: a row created here has no source in the master, so the next
+// refresh would drop it. Notes go in the cart's tab in the master.
+// The script still has a todoAdd endpoint; nothing calls it.
 
 // "Notes to clear": notes whose to-do has been ticked off but that are still
 // written in the master workbook. The script cannot edit that file, so this is
