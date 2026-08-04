@@ -10498,7 +10498,7 @@ document.getElementById('refreshbtn').onclick = function () {
 function refreshTodosNow() {
   var btn = document.getElementById('refreshbtn');
   btn.disabled = true;
-  jsonp({ action: 'refreshTodos', token: token }, 120000).then(function (res) {
+  jsonp({ action: 'refreshTodos', token: token }, 240000).then(function (res) {
     btn.disabled = false;
     if (!res || res.ok === false) {
       toast('To-do refresh failed');
@@ -10506,7 +10506,8 @@ function refreshTodosNow() {
     }
     todos = res.todos || todos;
     if (res.hidden) hiddenCarts = res.hidden;
-    if (res.carts) serverCarts = res.carts;   // tiles follow the master's tabs
+    // Only when it actually reported some: an empty list would blank the grid.
+    if (res.carts && res.carts.length) serverCarts = res.carts;
     renderTodos();
     loadPendingNotes();
     var bits = [];
@@ -11060,7 +11061,7 @@ function loadTodos() {
     if (!res || res.ok === false) { toast('Could not load to-dos'); return; }
     todos = res.todos || [];
     if (res.hidden) hiddenCarts = res.hidden;
-    if (res.carts) serverCarts = res.carts;
+    if (res.carts && res.carts.length) serverCarts = res.carts;
     renderTodos();
     loadPendingNotes();
   }).catch(function (err) {

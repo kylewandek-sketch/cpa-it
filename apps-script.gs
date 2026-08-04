@@ -588,27 +588,43 @@ function rosterNoteColumns_(sh) {
 // on row 1 is read correctly rather than being skipped as "not a roster tab".
 var ROSTER_SERIAL_RE = /serial|s\/n/i;
 
-function rosterHeaderRow_(sh) {
+// Rows 1-3 of a tab, read ONCE and remembered for the rest of the run.
+//
+// This matters more than it looks. rosterSerialColumn_, rosterNoteColumns_ and
+// rosterNumberColumn_ all want the headers, and each is called per tab; without
+// the cache every one of them is a separate round trip to the sheet, times ~50
+// tabs, and the dashboard's Refresh times out before the script finishes.
+var ROSTER_HEAD_CACHE = {};
+
+function rosterHeadReset_() { ROSTER_HEAD_CACHE = {}; }
+
+function rosterHeadInfo_(sh) {
+  var key = sh.getSheetId() + '|' + sh.getName();
+  var hit = ROSTER_HEAD_CACHE[key];
+  if (hit) return hit;
+
+  var info = { row: 2, heads: [] };
   var lastCol = sh.getLastColumn();
   var lastRow = sh.getLastRow();
-  if (!lastCol || !lastRow) return 2;
-  var probe = Math.min(3, lastRow);
-  var vals = sh.getRange(1, 1, probe, lastCol).getValues();
-  for (var r = 0; r < probe; r++) {
-    for (var c = 0; c < lastCol; c++) {
-      if (ROSTER_SERIAL_RE.test(String(vals[r][c] || ''))) return r + 1;
+  if (lastCol && lastRow) {
+    var probe = Math.min(3, lastRow);
+    var vals = sh.getRange(1, 1, probe, lastCol).getValues();   // the one read
+    var found = 0;
+    for (var r = 0; r < probe && !found; r++) {
+      for (var c = 0; c < lastCol; c++) {
+        if (ROSTER_SERIAL_RE.test(String(vals[r][c] || ''))) { found = r + 1; break; }
+      }
     }
+    info.row = found || 2;
+    info.heads = vals[info.row - 1] || [];      // [] when the tab is shorter than that
   }
-  return 2;
+  ROSTER_HEAD_CACHE[key] = info;
+  return info;
 }
 
-// The headers themselves, and the first row of data under them.
-function rosterHeads_(sh) {
-  var lastCol = Math.max(sh.getLastColumn(), 1);
-  return sh.getRange(rosterHeaderRow_(sh), 1, 1, lastCol).getValues()[0];
-}
-
-function rosterDataRow_(sh) { return rosterHeaderRow_(sh) + 1; }
+function rosterHeaderRow_(sh) { return rosterHeadInfo_(sh).row; }
+function rosterHeads_(sh) { return rosterHeadInfo_(sh).heads; }
+function rosterDataRow_(sh) { return rosterHeadInfo_(sh).row + 1; }
 
 // Which column on this tab holds the serials.
 function rosterSerialColumn_(sh) {
@@ -1009,13 +1025,14 @@ function purgeBogusTodos() {
 // master looks unchanged and skip.
 function refreshTodos_() {
   var sync = syncMirror_(true);
+  rosterHeadReset_();                 // the mirror was just rewritten
   var res = rebuildRosterTodos_();
   rebuildTicketTodos();
   var list = todoList_();
   return { ok: true, added: res.added, dropped: res.removed,
            imported: res.imported, kept: res.kept,
            sync: sync, todos: list.todos, hidden: list.hidden,
-           carts: rosterCartTabs_() };
+           carts: list.carts };       // todoList_ already worked this out
 }
 
 // ---- Full rebuild of the roster-sourced to-dos ------------------------------
@@ -1268,6 +1285,7 @@ function pad_(n) {
 // Run by hand in the editor to rebuild without going through the dashboard.
 function rebuildTodosNow() {
   var sync = syncMirror_(true);
+  rosterHeadReset_();
   Logger.log('mirror sync: ' + JSON.stringify(sync));
   Logger.log(JSON.stringify(rebuildRosterTodos_()));
   rebuildTicketTodos();
@@ -1513,6 +1531,7 @@ var TODO_REFRESH_HOURS = [7, 9, 12, 15];        // school time zone, see setupTo
 // current, and this runs unattended four times a day.
 function scheduledTodoRefresh() {
   var sync = syncMirror_(false);
+  rosterHeadReset_();
   var res = rebuildRosterTodos_();
   rebuildTicketTodos();
   Logger.log('scheduled refresh done. sync: ' + JSON.stringify(sync) +
