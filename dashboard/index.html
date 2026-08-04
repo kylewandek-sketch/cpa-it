@@ -10512,6 +10512,7 @@ function refreshTodosNow() {
     var bits = [];
     if (res.added) bits.push(res.added + ' note(s) added');
     if (res.dropped) bits.push(res.dropped + ' cleared');
+    if (res.timing && res.timing.total) bits.push(Math.round(res.timing.total / 1000) + 's');
     if (bits.length) toast('Tasks and closed log up to date — ' + bits.join(', '));
     else toast('Tasks and closed log already up to date');
   }).catch(function (err) {

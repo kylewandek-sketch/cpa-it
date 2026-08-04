@@ -1023,17 +1023,34 @@ function purgeBogusTodos() {
 // have to ask again.
 // The mirror sync is FORCED here: pressing Refresh should fetch, not decide the
 // master looks unchanged and skip.
+// Timed per stage. If this ever runs long enough for the page to give up, the
+// log says which stage cost the time rather than leaving it to guesswork.
 function refreshTodos_() {
+  var t0 = new Date().getTime();
   var sync = syncMirror_(true);
+  var tSync = new Date().getTime();
+
   rosterHeadReset_();                 // the mirror was just rewritten
   var res = rebuildRosterTodos_();
+  var tBuild = new Date().getTime();
+
   rebuildTicketTodos();
   var carts = cartTabsRefresh_();     // the mirror changed, so re-read the tabs
   var list = todoList_();
+  var tEnd = new Date().getTime();
+
+  var timing = {
+    mirrorSync: tSync - t0,
+    rebuild: tBuild - tSync,
+    tickets_carts_list: tEnd - tBuild,
+    total: tEnd - t0
+  };
+  Logger.log('refresh timing (ms): ' + JSON.stringify(timing));
+
   return { ok: true, added: res.added, dropped: res.removed,
            imported: res.imported, kept: res.kept,
            sync: sync, todos: list.todos, hidden: list.hidden,
-           carts: carts };
+           carts: carts, timing: timing };
 }
 
 // ---- Full rebuild of the roster-sourced to-dos ------------------------------
