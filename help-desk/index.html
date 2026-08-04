@@ -10320,8 +10320,61 @@ function beep() {
   } catch (e) {}
 }
 
+// Factory QR labels encode a support URL rather than the bare serial. A new
+// Lenovo reads as https://support.lenovo.com/qrcode?sn=YX0JK6SE&mtm=83T60009US
+// -- the serial is the sn parameter, and mtm is the model, not a serial. Our
+// own printed labels encode the bare serial and pass through unchanged.
+// apps-script.gs has the same logic in serialFromScan_; keep them in step.
+function serialFromScan(raw) {
+  var s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+
+  // Reads like a device serial on its own?
+  function bareSerial(v) {
+    var t = String(v || '').replace(/[\s-]+/g, '');
+    if (t.length < 6 || t.length > 30) return false;
+    if (!/^[A-Za-z0-9]+$/.test(t)) return false;
+    return /[A-Za-z]/.test(t) && /[0-9]/.test(t);
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    // A URL. Take the first query parameter that names a serial, so sn wins
+    // over mtm on a Lenovo link.
+    var q = s.indexOf('?');
+    if (q >= 0) {
+      var parts = s.slice(q + 1).split(/[&;]/);
+      for (var i = 0; i < parts.length; i++) {
+        var eq = parts[i].indexOf('=');
+        if (eq < 0) continue;
+        var key = parts[i].slice(0, eq).toLowerCase().replace(/[^a-z]/g, '');
+        if (key !== 'sn' && key !== 'serial' && key !== 'serialno' &&
+            key !== 'serialnumber' && key !== 'servicetag') continue;
+        var val = '';
+        try {
+          val = decodeURIComponent(parts[i].slice(eq + 1).replace(/\+/g, ' ')).trim();
+        } catch (e) {
+          val = parts[i].slice(eq + 1).trim();
+        }
+        if (val) return val;
+      }
+    }
+    // No serial parameter -- some makers put it in the last path segment.
+    var path = s.split(/[?#]/)[0].replace(/\/+$/, '');
+    var seg = path.slice(path.lastIndexOf('/') + 1);
+    if (bareSerial(seg)) return seg;
+    return s;             // nothing recognisable; keep what we read rather than
+                          // mangle it into something wrong
+  }
+
+  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value.
+  var m = s.match(/\b(?:s\/n|sn|serial(?:\s*(?:no|number))?|service\s*tag)\s*[:=]\s*([A-Za-z0-9-]+)/i);
+  if (m && m[1]) return m[1];
+
+  return s;
+}
+
 function onDetected(data) {
-  data = (data || '').trim();
+  data = serialFromScan(data);
   if (!data) return;
   snField.value = data;
   beep();

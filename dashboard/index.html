@@ -119,6 +119,20 @@
   .cart-card.alldone .ccount { color:var(--green); }
   .cart-card.newgroup { border-style:dashed; }
   .cart-card.newgroup .cname { color:var(--muted); font-weight:600; }
+  /* Delete control, tucked in the corner of each tile. Kept invisible until the
+     tile is hovered or focused so the grid stays calm, but always reachable by
+     keyboard. */
+  .cart-card { position:relative; }
+  .cart-card .cdel { position:absolute; top:4px; right:4px; width:22px; height:22px;
+    line-height:20px; text-align:center; border-radius:6px; border:1px solid transparent;
+    background:none; color:var(--muted); font-size:15px; cursor:pointer; padding:0;
+    opacity:0; transition:opacity .12s; }
+  .cart-card:hover .cdel, .cart-card .cdel:focus { opacity:1; }
+  .cart-card .cdel:hover { background:var(--red); border-color:var(--red); color:#fff; }
+  .hidden-carts { margin:10px 0 0; font-size:12px; color:var(--muted); }
+  .hidden-carts button { margin-left:6px; font-size:12px; padding:2px 8px; cursor:pointer;
+    border:1px solid var(--line); border-radius:6px; background:var(--card); color:inherit; }
+  .hidden-carts button:hover { border-color:var(--blue); }
   .todo-panel { background:var(--card); border:1px solid var(--line); border-radius:12px;
                 padding:16px; max-width:900px; }
   .tp-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
@@ -268,6 +282,7 @@
                 title="Notes finished with, that are still written in the master workbook">Notes to clear</button>
       </div>
       <div class="cart-grid" id="cartGrid"></div>
+      <div class="hidden-carts hidden" id="hiddenCarts"></div>
       <div id="todoPanel" class="todo-panel hidden">
         <div class="tp-head">
           <h3 id="tpName"></h3>
@@ -10496,6 +10511,7 @@ function refreshTodosNow() {
       return;
     }
     todos = res.todos || todos;
+    if (res.hidden) hiddenCarts = res.hidden;
     renderTodos();
     loadPendingNotes();
     var bits = [];
@@ -10893,6 +10909,59 @@ function renderLookup(res) {
   el.innerHTML = h;
 }
 
+// Factory QR labels encode a support URL rather than the bare serial. A new
+// Lenovo reads as https://support.lenovo.com/qrcode?sn=YX0JK6SE&mtm=83T60009US
+// -- the serial is the sn parameter, and mtm is the model, not a serial. Our
+// own printed labels encode the bare serial and pass through unchanged.
+// apps-script.gs has the same logic in serialFromScan_; keep them in step.
+function serialFromScan(raw) {
+  var s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+
+  // Reads like a device serial on its own?
+  function bareSerial(v) {
+    var t = String(v || '').replace(/[\s-]+/g, '');
+    if (t.length < 6 || t.length > 30) return false;
+    if (!/^[A-Za-z0-9]+$/.test(t)) return false;
+    return /[A-Za-z]/.test(t) && /[0-9]/.test(t);
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    // A URL. Take the first query parameter that names a serial, so sn wins
+    // over mtm on a Lenovo link.
+    var q = s.indexOf('?');
+    if (q >= 0) {
+      var parts = s.slice(q + 1).split(/[&;]/);
+      for (var i = 0; i < parts.length; i++) {
+        var eq = parts[i].indexOf('=');
+        if (eq < 0) continue;
+        var key = parts[i].slice(0, eq).toLowerCase().replace(/[^a-z]/g, '');
+        if (key !== 'sn' && key !== 'serial' && key !== 'serialno' &&
+            key !== 'serialnumber' && key !== 'servicetag') continue;
+        var val = '';
+        try {
+          val = decodeURIComponent(parts[i].slice(eq + 1).replace(/\+/g, ' ')).trim();
+        } catch (e) {
+          val = parts[i].slice(eq + 1).trim();
+        }
+        if (val) return val;
+      }
+    }
+    // No serial parameter -- some makers put it in the last path segment.
+    var path = s.split(/[?#]/)[0].replace(/\/+$/, '');
+    var seg = path.slice(path.lastIndexOf('/') + 1);
+    if (bareSerial(seg)) return seg;
+    return s;             // nothing recognisable; keep what we read rather than
+                          // mangle it into something wrong
+  }
+
+  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value.
+  var m = s.match(/\b(?:s\/n|sn|serial(?:\s*(?:no|number))?|service\s*tag)\s*[:=]\s*([A-Za-z0-9-]+)/i);
+  if (m && m[1]) return m[1];
+
+  return s;
+}
+
 // Camera scan for the lookup box
 var luStream = null, luScanning = false, luDetector = null;
 if ('BarcodeDetector' in window) {
@@ -10949,9 +11018,11 @@ async function luTick() {
         }
       } catch (e) {}
       if (hit) {
-        document.getElementById('lu_sn').value = hit.trim();
+        var sn = serialFromScan(hit);
+        if (!sn) { requestAnimationFrame(luTick); return; }
+        document.getElementById('lu_sn').value = sn;
         stopScan();
-        doLookup(hit);
+        doLookup(sn);
         return;
       }
     }
@@ -10993,6 +11064,7 @@ function loadTodos() {
     todosLoading = false;
     if (!res || res.ok === false) { toast('Could not load to-dos'); return; }
     todos = res.todos || [];
+    if (res.hidden) hiddenCarts = res.hidden;
     renderTodos();
     loadPendingNotes();
   }).catch(function (err) {
@@ -11114,7 +11186,20 @@ function allGroups() {
   extraGroups.forEach(function (g) {
     if (names.indexOf(g) < 0) names.push(g);
   });
-  return names;
+  return names.filter(function (g) { return !isHiddenCart(g); });
+}
+
+// Carts deleted from this page. The server holds the list -- hiding one in the
+// browser alone would not hold, because the scheduled refresh reads the master
+// and would put every item straight back.
+var hiddenCarts = [];
+
+function isHiddenCart(name) {
+  var n = String(name || '').trim().toLowerCase();
+  for (var i = 0; i < hiddenCarts.length; i++) {
+    if (String(hiddenCarts[i]).trim().toLowerCase() === n) return true;
+  }
+  return false;
 }
 
 function buildTodoItem(t) {
@@ -11246,6 +11331,9 @@ function renderCartGrid() {
                pendingHere + ' to clear</span>';
     }
     card.innerHTML =
+      '<button class="cdel" data-del="' + esc(g) + '" ' +
+      'title="Remove this cart from the to-do page" ' +
+      'aria-label="Remove cart ' + esc(g) + ' from the to-do page">&times;</button>' +
       '<div class="cname">' + esc(g) + '</div>' +
       '<div class="ccount">' + count + '</div>';
     grid.appendChild(card);
@@ -11257,7 +11345,38 @@ function renderCartGrid() {
   add.setAttribute('data-newgroup', '1');
   add.innerHTML = '<div class="cname">＋ New group</div><div class="ccount">name it</div>';
   grid.appendChild(add);
+
+  renderHiddenCarts();
 }
+
+// A removed cart is recoverable, so say so and give it a way back.
+function renderHiddenCarts() {
+  var el = document.getElementById('hiddenCarts');
+  if (!hiddenCarts.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  var html = 'Not shown: ';
+  hiddenCarts.forEach(function (g) {
+    html += '<button data-restore="' + esc(g) + '" title="Bring this cart back">' +
+            esc(g) + ' ↩</button>';
+  });
+  el.innerHTML = html;
+}
+
+document.getElementById('hiddenCarts').addEventListener('click', function (e) {
+  var btn = e.target.closest('button[data-restore]');
+  if (!btn) return;
+  var g = btn.getAttribute('data-restore');
+  btn.disabled = true;
+  jsonp({ action: 'todoShowGroup', token: token, group: g }).then(function (res) {
+    if (!res || res.ok === false) { btn.disabled = false; toast('Could not restore ' + g); return; }
+    hiddenCarts = res.hidden || [];
+    renderTodos();
+    toast(g + ' restored — hit Refresh to pull its notes back in');
+  }).catch(function (err) {
+    btn.disabled = false;
+    toast('Could not restore ' + g + ': ' + err.message);
+  });
+});
 
 function renderPanel() {
   var panel = document.getElementById('todoPanel');
@@ -11295,6 +11414,14 @@ function selectGroup(g) {
 }
 
 document.getElementById('cartGrid').addEventListener('click', function (e) {
+  // Delete comes first: the button sits inside the tile, and clicking it must
+  // not also select the cart.
+  var del = e.target.closest('button[data-del]');
+  if (del) {
+    e.stopPropagation();
+    deleteCart(del.getAttribute('data-del'), del);
+    return;
+  }
   var card = e.target.closest('.cart-card');
   if (!card) return;
   if (card.getAttribute('data-newgroup')) {
@@ -11310,6 +11437,40 @@ document.getElementById('cartGrid').addEventListener('click', function (e) {
   }
   selectGroup(card.getAttribute('data-group'));
 });
+
+// Takes the cart off the grid and stops that tab being imported. Nothing is
+// deleted -- the cart's notes simply stop being pulled in from the master, and
+// restoring it brings them back on the next refresh.
+function deleteCart(g, btn) {
+  var items = groupItems(g);
+  var msg = 'Remove "' + g + '" from the to-do page?\n\n';
+  if (items.length) msg += '• its ' + items.length + ' item(s) stop showing here\n';
+  msg += '• the tab stops being imported from the master workbook\n' +
+         '\nNothing is deleted from the master, and other carts are unaffected. ' +
+         'You can bring it back from the link under the grid.';
+  if (!confirm(msg)) return;
+
+  if (btn) btn.disabled = true;
+  jsonp({ action: 'todoHideGroup', token: token, group: g }).then(function (res) {
+    if (!res || res.ok === false) {
+      if (btn) btn.disabled = false;
+      toast('Could not remove ' + g);
+      return;
+    }
+    hiddenCarts = res.hidden || [];
+    var i = extraGroups.indexOf(g);
+    if (i >= 0) extraGroups.splice(i, 1);
+    if (selectedGroup === g) {
+      selectedGroup = '';
+      try { localStorage.removeItem(SEL_KEY); } catch (err) {}
+    }
+    renderTodos();                 // isHiddenCart keeps it off the grid at once
+    toast('Removed ' + g + ' from the to-do page');
+  }).catch(function (err) {
+    if (btn) btn.disabled = false;
+    toast('Could not remove ' + g + ': ' + err.message);
+  });
+}
 
 document.getElementById('tpClose').onclick = function () { selectGroup(selectedGroup); };
 

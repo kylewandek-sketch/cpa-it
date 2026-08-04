@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-07-31 roster-mirror';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-08-04 serial-parse + todo-rebuild';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -49,7 +49,7 @@ function doGet(e) {
   var out;
   var guarded = ['list', 'update', 'archiveTest', 'stats', 'lookup', 'notesToClear',
                  'todoList', 'todoAdd', 'todoUpdate', 'todoDelete', 'todoReorder',
-                 'refreshTodos'];
+                 'todoHideGroup', 'todoShowGroup', 'refreshTodos'];
   if (guarded.indexOf(p.action) >= 0 && p.token !== ADMIN_TOKEN) {
     out = { ok: false, error: 'unauthorized' };
   } else if (p.action === 'list') {
@@ -76,6 +76,10 @@ function doGet(e) {
     out = todoDelete_(p);
   } else if (p.action === 'todoReorder') {
     out = todoReorder_(p);
+  } else if (p.action === 'todoHideGroup') {
+    out = todoHideGroup_(p);
+  } else if (p.action === 'todoShowGroup') {
+    out = todoShowGroup_(p);
   } else if (p.action === 'snCheck') {
     out = snCheck_(p);            // public: submit form checks the S/N before filing
   } else if (p.action === 'openCount') {
@@ -176,7 +180,7 @@ function sendStatusEmail_(sheet, row, status) {
 // ticket, so a mistyped S/N gets questioned rather than silently accepted.
 // Public (no token); returns nothing about who the device belongs to.
 function snCheck_(p) {
-  var sn = String(p.sn || '').trim();
+  var sn = serialFromScan_(p.sn);
   if (!sn) return { ok: true, found: false };
   try {
     var hits = rosterFindRows_(sn);
@@ -189,7 +193,7 @@ function snCheck_(p) {
 
 // Count of OPEN (not Resolved) tickets for a given S/N in the live sheet. Public (no token).
 function openCount_(p) {
-  var sn = String(p.sn || '').trim().toLowerCase();
+  var sn = serialFromScan_(p.sn).toLowerCase();
   if (!sn) return { ok: true, count: 0 };
   var sheet = firstSheet_();
   var lastRow = sheet.getLastRow();
@@ -238,7 +242,7 @@ function stats_() {
 // past ticket for it (live sheet + all archive tabs). Uses createTextFinder so the
 // search happens in one optimized pass per workbook rather than tab-by-tab.
 function deviceLookup_(p) {
-  var sn = String(p.sn || '').trim();
+  var sn = serialFromScan_(p.sn);
   if (!sn) return { ok: false, error: 'No serial provided.' };
   var out = { ok: true, sn: sn, assignments: [], tickets: [], todos: [] };
 
@@ -943,16 +947,182 @@ function purgeBogusTodos() {
 // Everything the scheduled job does, on demand from the dashboard's Refresh
 // button, and it hands the finished list straight back so the page does not
 // have to ask again.
+// The mirror sync is FORCED here: pressing Refresh should fetch, not decide the
+// master looks unchanged and skip.
 function refreshTodos_() {
-  var sync = syncMirror_(false);          // no-op unless the master has changed
-  var added = importRosterNotes_();
-  var dropped = reconcileRosterTodos_();
+  var sync = syncMirror_(true);
+  var res = rebuildRosterTodos_();
   rebuildTicketTodos();
   var list = todoList_();
-  return { ok: true, added: added, dropped: dropped, sync: sync, todos: list.todos };
+  return { ok: true, added: res.added, dropped: res.removed,
+           imported: res.imported, kept: res.kept,
+           sync: sync, todos: list.todos, hidden: list.hidden };
+}
+
+// ---- Full rebuild of the roster-sourced to-dos ------------------------------
+// Refresh used to MERGE: importRosterNotes_ added what was new and
+// reconcileRosterTodos_ was the only thing that ever deleted. Reconcile located
+// a note's source by tab name and column index, and KEPT anything it could not
+// find -- so renaming a cart tab in the master orphaned every item stamped with
+// the old name, and the item could never be cleared again. Same story if a
+// device moved carts.
+//
+// Rebuilding sidesteps all of it: the roster part of the list is only ever what
+// the master says now. Hand-typed items (ids that are plain numbers) are left
+// alone, and ticket- items are rebuilt by rebuildTicketTodos().
+//
+// Status and Done are carried across on a key of serial + note text, which
+// survives the note moving tab or column -- a rebuild should not throw away
+// work you did on an item that is still there.
+
+// The trailing "  (CB #4 · S/N ABC123)" that deviceTag_ adds, so the original
+// note text can be recovered from a stored label.
+var TODO_TAG_RE = /\s*\([^)]*S\/N[^)]*\)\s*$/;
+
+function todoStateKey_(sn, noteText) {
+  return noteKey_(sn, String(noteText).replace(TODO_TAG_RE, '').trim());
+}
+
+// Serial out of a roster- id. Ids are roster-<serial>-<column>.
+function todoIdSerial_(id) {
+  var m = String(id || '').match(/^roster-(.+)-(\d+)$/);
+  return m ? m[1] : '';
+}
+
+function rebuildRosterTodos_() {
+  var sh = todoSheet_();
+  var width = TODO_HEADERS.length;
+
+  // ---- 1. read the sheet as it stands, raw, so Created survives ----
+  var keep = [];        // hand-typed and ticket- rows, untouched
+  var before = {};      // state key -> { done, status }
+  var beforeKeys = {};
+  var lastRow = sh.getLastRow();
+  if (lastRow > 1) {
+    var rows = sh.getRange(2, 1, lastRow - 1, width).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      var id = String(rows[i][0] || '');
+      if (!id) continue;
+      if (id.indexOf('roster-') !== 0) {
+        keep.push(rows[i]);                       // not ours to rebuild
+        continue;
+      }
+      var sn = todoIdSerial_(id);
+      if (!sn) continue;
+      var st = String(rows[i][6] || '').trim();
+      if (TODO_STATUSES.indexOf(st) < 0) st = TODO_STATUS_DEFAULT;
+      var key = todoStateKey_(sn, rows[i][1]);
+      before[key] = { done: (rows[i][2] === true || rows[i][2] === 'TRUE'), status: st };
+      beforeKeys[key] = true;
+    }
+  }
+
+  // ---- 2. read every roster note in the mirror ----
+  var fresh = [];
+  var afterKeys = {};
+  var handled = {};
+  var handledList = handledNotes_();
+  for (var q = 0; q < handledList.length; q++) handled[handledList[q]] = true;
+
+  var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
+  var tabs = ss.getSheets();
+  for (var t = 0; t < tabs.length; t++) {
+    var tab = tabs[t];
+    if (mirrorIsProtectedTab_(tab.getName())) continue;
+    if (isHiddenGroup_(tab.getName())) continue;    // cart deleted from the to-do page
+    var snCol = rosterSerialColumn_(tab);
+    if (!snCol) continue;                          // not a roster tab
+    var noteCols = rosterNoteColumns_(tab);
+    if (!noteCols.length) continue;
+    var numCol = rosterNumberColumn_(tab);
+    var tabLastRow = tab.getLastRow();
+    if (tabLastRow < 3) continue;
+    var tabLastCol = tab.getLastColumn();
+    var heads2 = tab.getRange(2, 1, 1, tabLastCol).getValues()[0];
+    var vals = tab.getRange(3, 1, tabLastRow - 2, tabLastCol).getValues();
+
+    for (var r = 0; r < vals.length; r++) {
+      var sn2 = String(vals[r][snCol - 1] || '').trim();
+      if (!looksLikeRosterSerial_(sn2)) continue;  // header row of a second table, or blank
+      var cbNo = '';
+      if (looksLikePosition_(vals[r][numCol - 1])) cbNo = String(vals[r][numCol - 1]).trim();
+
+      for (var k = 0; k < noteCols.length; k++) {
+        var raw = vals[r][noteCols[k] - 1];
+        if (!isRealNote_(raw)) continue;           // checkbox, flag, number, date
+        var note = String(raw).trim();
+        var colHead = String(heads2[noteCols[k] - 1] || '').trim();
+        if (colHead && note.toLowerCase() === colHead.toLowerCase()) continue;
+
+        var key2 = todoStateKey_(sn2, note);
+        // One item per device per note, even where a serial is listed on more
+        // than one tab. Two DIFFERENT notes on a device still give two items.
+        if (afterKeys[key2]) continue;
+        afterKeys[key2] = true;
+
+        var prev = before[key2] || { done: false, status: TODO_STATUS_DEFAULT };
+
+        // A note that was ticked off but is still typed in the master belongs on
+        // the "notes to clear" report. Log it once, not on every refresh.
+        if (prev.done && !handled[noteKey_(sn2, note)]) {
+          markNoteHandled_(sn2, note);
+          logClosed_('roster-' + sn2 + '-' + noteCols[k], note, sn2, tab.getName(), 'ticked off');
+          handled[noteKey_(sn2, note)] = true;
+        }
+
+        fresh.push(['roster-' + sn2 + '-' + noteCols[k],
+                    note + deviceTag_(cbNo, sn2),
+                    prev.done,
+                    0,                             // order filled in below
+                    new Date(),
+                    tab.getName(),
+                    prev.status]);
+      }
+    }
+  }
+
+  // ---- 3. write the sheet back: kept rows first, then the fresh import ----
+  // Kept rows keep the Order they already had, so anything dragged into place on
+  // the dashboard stays put. Fresh rows go after them.
+  var order = 0;
+  var out = [];
+  for (var a = 0; a < keep.length; a++) {
+    var ord = Number(keep[a][3]) || 0;
+    if (ord > order) order = ord;
+    out.push(keep[a]);
+  }
+  for (var b = 0; b < fresh.length; b++) {
+    fresh[b][3] = ++order;
+    out.push(fresh[b]);
+  }
+
+  if (lastRow > 1) sh.getRange(2, 1, lastRow - 1, width).clearContent();
+  if (out.length) sh.getRange(2, 1, out.length, width).setValues(out);
+  SpreadsheetApp.flush();
+
+  // ---- 4. count what actually moved, for the dashboard toast ----
+  var added = 0;
+  var removed = 0;
+  for (var ka in afterKeys) { if (!beforeKeys[ka]) added++; }
+  for (var kb in beforeKeys) { if (!afterKeys[kb]) removed++; }
+
+  Logger.log('todo rebuild: ' + fresh.length + ' roster item(s) from the master, ' +
+             keep.length + ' hand-typed/ticket item(s) kept, ' +
+             added + ' new, ' + removed + ' gone');
+  return { imported: fresh.length, kept: keep.length, added: added, removed: removed };
+}
+
+// Run by hand in the editor to rebuild without going through the dashboard.
+function rebuildTodosNow() {
+  var sync = syncMirror_(true);
+  Logger.log('mirror sync: ' + JSON.stringify(sync));
+  Logger.log(JSON.stringify(rebuildRosterTodos_()));
+  rebuildTicketTodos();
 }
 
 // The one-time cross-check. Idempotent, so re-running it is harmless.
+// No longer on the Refresh path -- rebuildRosterTodos_ replaced it -- but kept
+// for running an import by hand.
 function importRosterNotesNow() {
   Logger.log(importRosterNotes_() + ' item(s) added');
 }
@@ -1186,13 +1356,15 @@ function syncMirrorNow() {
 var TODO_REFRESH_FN = 'scheduledTodoRefresh';
 var TODO_REFRESH_HOURS = [7, 9, 12, 15];        // school time zone, see setupTodoTriggers
 
+// Not forced here: when the master has not changed the mirror is already
+// current, and this runs unattended four times a day.
 function scheduledTodoRefresh() {
-  var sync = syncMirror_(false);                // no-op when the master is unchanged
-  var added = importRosterNotes_();
-  var dropped = reconcileRosterTodos_();        // notes deleted or reworded in the workbook
+  var sync = syncMirror_(false);
+  var res = rebuildRosterTodos_();
   rebuildTicketTodos();
   Logger.log('scheduled refresh done. sync: ' + JSON.stringify(sync) +
-             ', notes imported: ' + added + ', items removed: ' + dropped);
+             ', roster items: ' + res.imported + ', new: ' + res.added +
+             ', gone: ' + res.removed + ', kept: ' + res.kept);
 }
 
 // Run once to install the four daily triggers. Running it again just replaces
@@ -1322,7 +1494,7 @@ function todoList_() {
     });
   });
   todos.sort(function (a, b) { return a.order - b.order; });
-  return { ok: true, todos: todos };
+  return { ok: true, todos: todos, hidden: hiddenGroups_() };
 }
 
 function todoFindRow_(sh, id) {
@@ -1407,6 +1579,77 @@ function todoReorder_(p) {
   return { ok: true };
 }
 
+// ---- Hidden carts -----------------------------------------------------------
+// Renaming a tab in the master leaves the to-do page showing the same physical
+// cart twice, once under each name, and the HS_Cart_* tabs are not wanted on
+// the page at all. Hiding a cart takes it off the grid and stops that tab being
+// imported.
+//
+// Nothing is deleted. The name goes on a list, rebuildRosterTodos_ skips that
+// tab, and the cart's rows simply stop being re-created on the next refresh.
+// Rows typed by hand are never rebuilt from anything, so they sit untouched in
+// the sheet and come back if the cart is restored.
+//
+// The list has to live on the server: hiding a cart in the browser alone would
+// not hold, because the scheduled refresh reads the master four times a day and
+// would put every item straight back.
+//
+// Tabs the master gains later are picked up as usual -- only names on this list
+// are skipped.
+var TODO_HIDDEN_KEY = 'hiddenTodoGroups';
+
+function hiddenGroups_() {
+  try {
+    var v = JSON.parse(PropertiesService.getScriptProperties().getProperty(TODO_HIDDEN_KEY) || '[]');
+    return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function isHiddenGroup_(name) {
+  var list = hiddenGroups_();
+  var n = String(name || '').trim().toLowerCase();
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i]).trim().toLowerCase() === n) return true;
+  }
+  return false;
+}
+
+// Remember the name so the tab is not imported again. Writes nothing to the
+// Todos sheet -- the cart's rows stop being re-created by the next rebuild, and
+// anything hand-typed stays put.
+function todoHideGroup_(p) {
+  var name = String(p.group || '').trim();
+  if (!name) return { ok: false, error: 'no group given' };
+  var list = hiddenGroups_();
+  if (!isHiddenGroup_(name)) list.push(name);
+  PropertiesService.getScriptProperties().setProperty(TODO_HIDDEN_KEY, JSON.stringify(list));
+  Logger.log('cart hidden: ' + name);
+  return { ok: true, group: name, hidden: hiddenGroups_() };
+}
+
+// Put a cart back. Its notes return on the next refresh.
+function todoShowGroup_(p) {
+  var name = String(p.group || '').trim();
+  if (!name) return { ok: false, error: 'no group given' };
+  var list = hiddenGroups_();
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i]).trim().toLowerCase() !== name.toLowerCase()) out.push(list[i]);
+  }
+  PropertiesService.getScriptProperties().setProperty(TODO_HIDDEN_KEY, JSON.stringify(out));
+  Logger.log('cart restored: ' + name);
+  return { ok: true, group: name, hidden: out };
+}
+
+// Run from the editor if a cart needs bringing back and the dashboard is not to
+// hand.
+function clearHiddenGroups() {
+  PropertiesService.getScriptProperties().deleteProperty(TODO_HIDDEN_KEY);
+  Logger.log('all hidden carts restored');
+}
+
 // ---- Photos ----
 // RUN THIS ONCE from the editor: it triggers the Drive authorization prompt and
 // verifies the script can actually write to PHOTO_FOLDER_ID. Check the log/result.
@@ -1485,6 +1728,12 @@ function doPost(e) {
       try { data = JSON.parse(e.postData.contents); } catch (err) { data = (e.parameter || {}); }
     } else { data = (e && e.parameter) || {}; }
 
+    // A factory QR code decodes to a support URL, not a serial. Whatever the
+    // form sent, store the serial. Done once here, so the row that is written,
+    // the photo file name, the email subject, the roster note and the to-do
+    // item all get the same clean value.
+    data.sn = serialFromScan_(data.sn);
+
     var sheet = firstSheet_();
     ensureHeaders_(sheet);
 
@@ -1551,4 +1800,112 @@ function sendEmail_(data, now, no, photoUrl) {
 
 function jsonOut_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---- Serial normalising -----------------------------------------------------
+// Factory QR labels encode a support URL rather than the bare serial. A new
+// Lenovo reads as https://support.lenovo.com/qrcode?sn=YX0JK6SE&mtm=83T60009US
+// -- the serial is the sn parameter, and mtm is the model, not a serial. Our
+// own printed labels encode the bare serial and pass through unchanged.
+//
+// The scanner pages do this too, so the teacher sees the right thing while
+// filling the form. It is repeated here because the server is the one place
+// every route passes through: a pasted URL, or a page still running the old
+// build out of the Pages cache, would otherwise put a link in the sheet.
+// serialFromScan() in the three HTML files is the same logic -- keep them in
+// step if either changes.
+function serialFromScan_(raw) {
+  var s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    // A URL. Take the first query parameter that names a serial, so sn wins
+    // over mtm on a Lenovo link.
+    var q = s.indexOf('?');
+    if (q >= 0) {
+      var parts = s.slice(q + 1).split(/[&;]/);
+      for (var i = 0; i < parts.length; i++) {
+        var eq = parts[i].indexOf('=');
+        if (eq < 0) continue;
+        var key = parts[i].slice(0, eq).toLowerCase().replace(/[^a-z]/g, '');
+        if (key !== 'sn' && key !== 'serial' && key !== 'serialno' &&
+            key !== 'serialnumber' && key !== 'servicetag') continue;
+        var val = '';
+        try {
+          val = decodeURIComponent(parts[i].slice(eq + 1).replace(/\+/g, ' ')).trim();
+        } catch (e) {
+          val = parts[i].slice(eq + 1).trim();
+        }
+        if (val) return val;
+      }
+    }
+    // No serial parameter -- some makers put it in the last path segment.
+    var path = s.split(/[?#]/)[0].replace(/\/+$/, '');
+    var seg = path.slice(path.lastIndexOf('/') + 1);
+    if (looksLikeRosterSerial_(seg)) return seg;
+    return s;             // nothing recognisable; keep what we read rather than
+                          // mangle it into something wrong
+  }
+
+  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value.
+  var m = s.match(/\b(?:s\/n|sn|serial(?:\s*(?:no|number))?|service\s*tag)\s*[:=]\s*([A-Za-z0-9-]+)/i);
+  if (m && m[1]) return m[1];
+
+  return s;
+}
+
+// ---- One-off cleanup of what is already stored ------------------------------
+// Tickets filed before the parsing went in have a URL sitting in column A.
+// Walks the live ticket sheet and every archive tab. listBadSerials reports and
+// writes nothing; fixStoredSerials applies.
+
+function listBadSerials() {
+  var found = badSerialRows_();
+  if (!found.length) {
+    Logger.log('nothing to fix -- every stored serial is already clean');
+    return 0;
+  }
+  Logger.log(found.length + ' row(s) hold a serial that needs rewriting:');
+  for (var i = 0; i < found.length; i++) {
+    Logger.log('  ' + found[i].tab + ' row ' + found[i].row + ':  ' +
+               found[i].was + '   ->   ' + found[i].now);
+  }
+  Logger.log('run fixStoredSerials() to apply these');
+  return found.length;
+}
+
+function fixStoredSerials() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var found = badSerialRows_();
+  for (var i = 0; i < found.length; i++) {
+    ss.getSheetByName(found[i].tab).getRange(found[i].row, 1).setValue(found[i].now);
+    Logger.log('fixed ' + found[i].tab + ' row ' + found[i].row + ': ' +
+               found[i].was + ' -> ' + found[i].now);
+  }
+  Logger.log(found.length + ' serial(s) rewritten');
+  return found.length;
+}
+
+function badSerialRows_() {
+  var out = [];
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var live = firstSheet_().getName();
+  var tabs = ss.getSheets();
+  for (var t = 0; t < tabs.length; t++) {
+    var sh = tabs[t];
+    var name = sh.getName();
+    // Ticket data only: the live sheet and the monthly archives. Not the Todos
+    // tab, not anything mirrored.
+    if (name !== live && name.toLowerCase().indexOf('ticket') < 0) continue;
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) continue;
+    var v = sh.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var r = 0; r < v.length; r++) {
+      var was = String(v[r][0] || '').trim();
+      if (!was) continue;
+      var now = serialFromScan_(was);
+      if (now && now !== was) out.push({ tab: name, row: r + 2, was: was, now: now });
+    }
+  }
+  return out;
 }
