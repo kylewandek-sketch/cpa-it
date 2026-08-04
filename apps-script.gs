@@ -1028,11 +1028,12 @@ function refreshTodos_() {
   rosterHeadReset_();                 // the mirror was just rewritten
   var res = rebuildRosterTodos_();
   rebuildTicketTodos();
+  var carts = cartTabsRefresh_();     // the mirror changed, so re-read the tabs
   var list = todoList_();
   return { ok: true, added: res.added, dropped: res.removed,
            imported: res.imported, kept: res.kept,
            sync: sync, todos: list.todos, hidden: list.hidden,
-           carts: list.carts };       // todoList_ already worked this out
+           carts: carts };
 }
 
 // ---- Full rebuild of the roster-sourced to-dos ------------------------------
@@ -1225,6 +1226,31 @@ function rosterCartTabs_() {
   return names;
 }
 
+// rosterCartTabs_ opens the mirror and walks every tab, which is far too slow to
+// do on every todoList call -- that is what the dashboard asks for each time the
+// To-Do tab is opened, and it used to be a quick read of one sheet. The list only
+// changes when the mirror does, so it is worked out on a refresh and parked in a
+// script property for everything else to read instantly.
+var CART_TABS_KEY = 'cartTabsCache';
+
+function cartTabsCached_() {
+  try {
+    var v = JSON.parse(PropertiesService.getScriptProperties().getProperty(CART_TABS_KEY) || 'null');
+    if (Object.prototype.toString.call(v) === '[object Array]') return v;
+  } catch (e) {}
+  return null;                    // never cached; caller works it out the slow way
+}
+
+function cartTabsRefresh_() {
+  var names = rosterCartTabs_();
+  try {
+    PropertiesService.getScriptProperties().setProperty(CART_TABS_KEY, JSON.stringify(names));
+  } catch (e) {
+    Logger.log('could not cache cart tabs: ' + e);
+  }
+  return names;
+}
+
 // Diagnostic. Lists every tab in the mirror in workbook order and says whether
 // the to-do code can see it, so a tab that is missing from the dashboard can be
 // told apart from one that is there but laid out differently.
@@ -1289,6 +1315,7 @@ function rebuildTodosNow() {
   Logger.log('mirror sync: ' + JSON.stringify(sync));
   Logger.log(JSON.stringify(rebuildRosterTodos_()));
   rebuildTicketTodos();
+  Logger.log('carts: ' + JSON.stringify(cartTabsRefresh_()));
 }
 
 // The one-time cross-check. Idempotent, so re-running it is harmless.
@@ -1534,6 +1561,7 @@ function scheduledTodoRefresh() {
   rosterHeadReset_();
   var res = rebuildRosterTodos_();
   rebuildTicketTodos();
+  cartTabsRefresh_();
   Logger.log('scheduled refresh done. sync: ' + JSON.stringify(sync) +
              ', roster items: ' + res.imported + ', new: ' + res.added +
              ', gone: ' + res.removed + ', kept: ' + res.kept);
@@ -1666,7 +1694,9 @@ function todoList_() {
     });
   });
   todos.sort(function (a, b) { return a.order - b.order; });
-  return { ok: true, todos: todos, hidden: hiddenGroups_(), carts: rosterCartTabs_() };
+  // Cached: the slow walk happens on a refresh, not on every tab open.
+  return { ok: true, todos: todos, hidden: hiddenGroups_(),
+           carts: cartTabsCached_() || cartTabsRefresh_() };
 }
 
 function todoFindRow_(sh, id) {

@@ -10506,8 +10506,7 @@ function refreshTodosNow() {
     }
     todos = res.todos || todos;
     if (res.hidden) hiddenCarts = res.hidden;
-    // Only when it actually reported some: an empty list would blank the grid.
-    if (res.carts && res.carts.length) serverCarts = res.carts;
+    setServerCarts(res.carts);
     renderTodos();
     loadPendingNotes();
     var bits = [];
@@ -11056,12 +11055,13 @@ var todosLoading = false;
 function loadTodos() {
   if (todosLoading) return;
   todosLoading = true;
+  renderTodos();          // draw from the cached cart list now; correct it below
   jsonp({ action: 'todoList', token: token }).then(function (res) {
     todosLoading = false;
     if (!res || res.ok === false) { toast('Could not load to-dos'); return; }
     todos = res.todos || [];
     if (res.hidden) hiddenCarts = res.hidden;
-    if (res.carts && res.carts.length) serverCarts = res.carts;
+    setServerCarts(res.carts);
     renderTodos();
     loadPendingNotes();
   }).catch(function (err) {
@@ -11173,10 +11173,23 @@ function groupOf(t) {
 }
 
 // Roster carts first, then any group found in the data (iPads, Checks to finish, ...).
-// The carts the master workbook actually has, as reported by the script. Null
-// until the first reply comes back -- and on an older deployment that does not
-// send them, which is why CARTS stays as the fallback.
+// The carts the master workbook actually has, as reported by the script. Kept in
+// localStorage so the grid draws straight away when the To-Do tab is opened,
+// rather than sitting empty until the round trip finishes. Null when nothing has
+// been cached yet -- and on an older deployment that does not send them, which is
+// why CARTS stays as the fallback.
+var CARTS_KEY = 'cpa_todo_carts';
 var serverCarts = null;
+try {
+  var savedCarts = JSON.parse(localStorage.getItem(CARTS_KEY) || 'null');
+  if (savedCarts && savedCarts.length) serverCarts = savedCarts;
+} catch (e) { serverCarts = null; }
+
+function setServerCarts(list) {
+  if (!list || !list.length) return;          // never blank the grid
+  serverCarts = list;
+  try { localStorage.setItem(CARTS_KEY, JSON.stringify(list)); } catch (e) {}
+}
 
 function allGroups() {
   // A cart that is no longer a tab in the master stops being drawn. Groups that
