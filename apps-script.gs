@@ -603,20 +603,42 @@ function rosterHeadInfo_(sh) {
   var hit = ROSTER_HEAD_CACHE[key];
   if (hit) return hit;
 
-  var info = { row: 2, heads: [] };
+  var info = { row: 2, heads: [], serialCol: 0 };
   var lastCol = sh.getLastColumn();
   var lastRow = sh.getLastRow();
   if (lastCol && lastRow) {
-    var probe = Math.min(3, lastRow);
+    var probe = Math.min(6, lastRow);
     var vals = sh.getRange(1, 1, probe, lastCol).getValues();   // the one read
-    var found = 0;
-    for (var r = 0; r < probe && !found; r++) {
+
+    // 1) A header row naming a serial, in the first three rows. Cart tabs put
+    //    it on row 2; the iPad list uses row 2 as well but with its own columns.
+    var top = Math.min(3, probe);
+    for (var r = 0; r < top && !info.serialCol; r++) {
       for (var c = 0; c < lastCol; c++) {
-        if (ROSTER_SERIAL_RE.test(String(vals[r][c] || ''))) { found = r + 1; break; }
+        if (ROSTER_SERIAL_RE.test(String(vals[r][c] || ''))) {
+          info.row = r + 1;
+          info.serialCol = c + 1;
+          info.heads = vals[r];
+          break;
+        }
       }
     }
-    info.row = found || 2;
-    info.heads = vals[info.row - 1] || [];      // [] when the tab is shorter than that
+
+    // 2) No headers at all -- some tabs (Speech) are a bare list, serial in the
+    //    first column and data from row 1. Find the column that actually holds
+    //    serials. row 0 means "no header row", so data starts at row 1.
+    if (!info.serialCol) {
+      for (var c2 = 0; c2 < lastCol && !info.serialCol; c2++) {
+        for (var r2 = 0; r2 < probe; r2++) {
+          if (looksLikeRosterSerial_(vals[r2][c2])) {
+            info.row = 0;
+            info.serialCol = c2 + 1;
+            info.heads = [];
+            break;
+          }
+        }
+      }
+    }
   }
   ROSTER_HEAD_CACHE[key] = info;
   return info;
@@ -626,15 +648,35 @@ function rosterHeaderRow_(sh) { return rosterHeadInfo_(sh).row; }
 function rosterHeads_(sh) { return rosterHeadInfo_(sh).heads; }
 function rosterDataRow_(sh) { return rosterHeadInfo_(sh).row + 1; }
 
-// Which column on this tab holds the serials.
-function rosterSerialColumn_(sh) {
-  var lastCol = Math.max(sh.getLastColumn(), 2);
-  var heads = rosterHeads_(sh);
-  for (var c = 1; c <= lastCol; c++) {
-    if (ROSTER_SERIAL_RE.test(String(heads[c - 1] || ''))) return c;
+// The master's tab order, as recorded by the last sync. mirrorCopyTabs_ walks
+// the converted master in workbook order and stores the names it wrote, so this
+// is the master's order for free -- no extra reads. The mirror's own tab order
+// drifts, because tabs the master gains are appended to the end of it.
+function masterTabOrder_() {
+  try {
+    var v = JSON.parse(PropertiesService.getScriptProperties().getProperty(MIRROR_TABS_KEY) || '[]');
+    return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+  } catch (e) {
+    return [];
   }
-  return 0;
 }
+
+// Sort tab names into the master's order. Anything the last sync did not write
+// keeps its relative position at the end rather than being dropped.
+function sortByMasterOrder_(names) {
+  var order = masterTabOrder_();
+  if (!order.length) return names;
+  var rank = {};
+  for (var i = 0; i < order.length; i++) rank[order[i]] = i;
+  return names.slice().sort(function (a, b) {
+    var ra = rank[a] === undefined ? 100000 : rank[a];
+    var rb = rank[b] === undefined ? 100000 : rank[b];
+    return ra - rb;
+  });
+}
+
+// Which column on this tab holds the serials.
+function rosterSerialColumn_(sh) { return rosterHeadInfo_(sh).serialCol; }
 
 // Plenty of cells in a roster row are not notes: ticked checkboxes come back as
 // the boolean true, and columns like "Computer Working" hold yes/no flags,
@@ -1126,8 +1168,12 @@ function rebuildRosterTodos_() {
   var handledList = handledNotes_();
   for (var q = 0; q < handledList.length; q++) handled[handledList[q]] = true;
 
+  // Walked in the master's tab order, so the Order column the dashboard sorts on
+  // comes out matching the grid rather than the mirror's own tab order.
   var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
-  var tabs = ss.getSheets();
+  var byName = {};
+  ss.getSheets().forEach(function (s) { byName[s.getName()] = s; });
+  var tabs = sortByMasterOrder_(Object.keys(byName)).map(function (n) { return byName[n]; });
   for (var t = 0; t < tabs.length; t++) {
     var tab = tabs[t];
     if (todoIgnoreTab_(tab.getName())) continue;   // not a cart, or removed from the page
@@ -1240,7 +1286,7 @@ function rosterCartTabs_() {
   } catch (e) {
     Logger.log('could not list cart tabs: ' + e);
   }
-  return names;
+  return sortByMasterOrder_(names);   // the grid follows the workbook
 }
 
 // rosterCartTabs_ opens the mirror and walks every tab, which is far too slow to
@@ -1276,9 +1322,11 @@ function cartTabsRefresh_() {
 // (syncMirrorNow) if the master has changed since the last refresh.
 function listCartTabs() {
   var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
-  var tabs = ss.getSheets();
+  var byName = {};
+  ss.getSheets().forEach(function (sh) { byName[sh.getName()] = sh; });
+  var tabs = sortByMasterOrder_(Object.keys(byName)).map(function (n) { return byName[n]; });
   var seen = 0;
-  Logger.log(tabs.length + ' tab(s) in the mirror, in workbook order:');
+  Logger.log(tabs.length + ' tab(s) in the mirror, in the master\'s tab order:');
   Logger.log('');
   for (var i = 0; i < tabs.length; i++) {
     var tab = tabs[i];
@@ -1306,7 +1354,7 @@ function listCartTabs() {
     var numCol = rosterNumberColumn_(tab);
     var hdrRow = rosterHeaderRow_(tab);
     var rows = Math.max(0, tab.getLastRow() - hdrRow);
-    Logger.log(pad_(i + 1) + name + '  -- ok: headers=row' + hdrRow +
+    Logger.log(pad_(i + 1) + name + '  -- ok: headers=' + (hdrRow ? 'row' + hdrRow : 'none, data from row 1') +
                ', serial=col' + snCol +
                ', number=col' + numCol +
                ', notes=col' + (noteCols.length ? noteCols.join('/') : 'NONE') +
