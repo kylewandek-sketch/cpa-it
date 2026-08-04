@@ -26,6 +26,30 @@ var NOTE_BOOK_ID = ROSTER_SHEET_ID;
 // Cart for a to-do item when the serial is not on any roster tab.
 var TODO_GROUP_FALLBACK = 'Unassigned';
 
+// Tabs in the master that are not carts and should never reach the to-do page:
+// the per-teacher lists and the separate iPad cart. Matched on the whole name,
+// ignoring case and surrounding spaces. This is for tabs that are structurally
+// not carts -- for a one-off choice, use the remove control on the dashboard,
+// which writes to hiddenTodoGroups instead.
+var TODO_SKIP_TABS = [
+  'Crider', 'Palsa', 'Buechner', 'Aeh', 'Jablonski', 'Miller', 'Perez',
+  'Caudill', 'Moorman', 'Title 1', 'iPad Cart - Hunter'
+];
+
+function isSkippedTab_(name) {
+  var n = String(name || '').trim().toLowerCase();
+  for (var i = 0; i < TODO_SKIP_TABS.length; i++) {
+    if (TODO_SKIP_TABS[i].toLowerCase() === n) return true;
+  }
+  return false;
+}
+
+// Everything the to-do page should leave alone: ticket/todo tabs, the skip list
+// above, and carts removed from the dashboard.
+function todoIgnoreTab_(name) {
+  return mirrorIsProtectedTab_(name) || isSkippedTab_(name) || isHiddenGroup_(name);
+}
+
 // The school-account master workbook. Read-only source for the mirror; nothing
 // is ever written back to it.
 // This is the workbook the cart notes are typed into.
@@ -358,7 +382,7 @@ function rosterTabScore_(sh) {
   if (name.indexOf('inventory') >= 0) score += 1000;
   if (name.indexOf('ipads') >= 0 || name.indexOf('spares') >= 0) score += 500;
   var lastCol = Math.min(sh.getLastColumn(), 14);   // headers never run past N
-  var heads = sh.getRange(2, 1, 1, lastCol).getValues()[0];
+  var heads = rosterHeads_(sh);
   var assigns = false;
   for (var i = 0; i < heads.length; i++) {
     if (String(heads[i]).toLowerCase().indexOf('student') >= 0) assigns = true;
@@ -387,7 +411,7 @@ function rosterPickBest_(hits) {
 // lines up in it.
 function rosterNoteColumn_(sh) {
   var lastCol = Math.max(sh.getLastColumn(), 3);
-  var heads = sh.getRange(2, 1, 1, lastCol).getValues()[0];
+  var heads = rosterHeads_(sh);
   for (var c = 1; c <= lastCol; c++) {
     if (!String(heads[c - 1] || '').trim()) return c;
   }
@@ -451,7 +475,7 @@ function ticketTodoId_(ticketNo) { return 'ticket-' + ticketNo; }
 // cart tabs, "iPad" on the tablet ones. Falls back to column A.
 function rosterNumberColumn_(sh) {
   var lastCol = Math.max(sh.getLastColumn(), 1);
-  var heads = sh.getRange(2, 1, 1, lastCol).getValues()[0];
+  var heads = rosterHeads_(sh);
   for (var c = 1; c <= lastCol; c++) {
     var h = String(heads[c - 1] || '').toLowerCase();
     if (h.indexOf('serial') >= 0) continue;
@@ -544,7 +568,7 @@ var NOTE_HEADER_RE = /(note|issue|repair|comment|problem|damage|broken|status)/i
 
 function rosterNoteColumns_(sh) {
   var lastCol = Math.max(sh.getLastColumn(), 3);
-  var heads = sh.getRange(2, 1, 1, lastCol).getValues()[0];
+  var heads = rosterHeads_(sh);
   var cols = [];
   for (var c = 3; c <= lastCol; c++) {
     var h = String(heads[c - 1] || '').trim();
@@ -555,12 +579,43 @@ function rosterNoteColumns_(sh) {
   return cols;
 }
 
+// Cart tabs put their headers on row 2 and data from row 3, but not every tab
+// in the master is laid out that way -- the iPad list is not. Find the row the
+// headers are actually on by looking for something that names a serial in the
+// first three rows. Falls back to 2, which is what the cart tabs use.
+//
+// Everything that reads a roster tab goes through this, so a tab with headers
+// on row 1 is read correctly rather than being skipped as "not a roster tab".
+var ROSTER_SERIAL_RE = /serial|s\/n/i;
+
+function rosterHeaderRow_(sh) {
+  var lastCol = sh.getLastColumn();
+  var lastRow = sh.getLastRow();
+  if (!lastCol || !lastRow) return 2;
+  var probe = Math.min(3, lastRow);
+  var vals = sh.getRange(1, 1, probe, lastCol).getValues();
+  for (var r = 0; r < probe; r++) {
+    for (var c = 0; c < lastCol; c++) {
+      if (ROSTER_SERIAL_RE.test(String(vals[r][c] || ''))) return r + 1;
+    }
+  }
+  return 2;
+}
+
+// The headers themselves, and the first row of data under them.
+function rosterHeads_(sh) {
+  var lastCol = Math.max(sh.getLastColumn(), 1);
+  return sh.getRange(rosterHeaderRow_(sh), 1, 1, lastCol).getValues()[0];
+}
+
+function rosterDataRow_(sh) { return rosterHeaderRow_(sh) + 1; }
+
 // Which column on this tab holds the serials.
 function rosterSerialColumn_(sh) {
   var lastCol = Math.max(sh.getLastColumn(), 2);
-  var heads = sh.getRange(2, 1, 1, lastCol).getValues()[0];
+  var heads = rosterHeads_(sh);
   for (var c = 1; c <= lastCol; c++) {
-    if (String(heads[c - 1] || '').toLowerCase().indexOf('serial') >= 0) return c;
+    if (ROSTER_SERIAL_RE.test(String(heads[c - 1] || ''))) return c;
   }
   return 0;
 }
@@ -640,17 +695,18 @@ function importRosterNotes_() {
   var tabs = ss.getSheets();
   for (var t = 0; t < tabs.length; t++) {
     var tab = tabs[t];
-    if (mirrorIsProtectedTab_(tab.getName())) continue;
+    if (todoIgnoreTab_(tab.getName())) continue;
     var snCol = rosterSerialColumn_(tab);
     if (!snCol) continue;                       // not a roster tab
     var noteCols = rosterNoteColumns_(tab);
     if (!noteCols.length) continue;
     var numCol = rosterNumberColumn_(tab);
     var lastRow = tab.getLastRow();
-    if (lastRow < 3) continue;
+    var dataRow = rosterDataRow_(tab);
+    if (lastRow < dataRow) continue;
     var lastCol = tab.getLastColumn();
-    var heads2 = tab.getRange(2, 1, 1, lastCol).getValues()[0];
-    var vals = tab.getRange(3, 1, lastRow - 2, lastCol).getValues();
+    var heads2 = rosterHeads_(tab);
+    var vals = tab.getRange(dataRow, 1, lastRow - dataRow + 1, lastCol).getValues();
     for (var r = 0; r < vals.length; r++) {
       var sn = String(vals[r][snCol - 1] || '').trim();
       if (!looksLikeRosterSerial_(sn)) continue;     // header row or blank
@@ -810,11 +866,12 @@ function rosterTodoSource_(todo) {
     var snCol = rosterSerialColumn_(tab);
     if (!snCol) return null;
     var lastRow = tab.getLastRow();
-    if (lastRow < 3) return null;
-    var col_vals = tab.getRange(3, snCol, lastRow - 2, 1).getValues();
+    var dataRow = rosterDataRow_(tab);
+    if (lastRow < dataRow) return null;
+    var col_vals = tab.getRange(dataRow, snCol, lastRow - dataRow + 1, 1).getValues();
     for (var i = 0; i < col_vals.length; i++) {
       if (String(col_vals[i][0]).trim() === sn) {
-        return { sheet: tab, row: i + 3, col: col, sn: sn };
+        return { sheet: tab, row: i + dataRow, col: col, sn: sn };
       }
     }
   } catch (e) {
@@ -881,14 +938,15 @@ function notesToClear_() {
   var tabs = ss.getSheets();
   for (var t = 0; t < tabs.length; t++) {
     var tab = tabs[t];
-    if (mirrorIsProtectedTab_(tab.getName())) continue;
+    if (todoIgnoreTab_(tab.getName())) continue;
     var snCol = rosterSerialColumn_(tab);
     if (!snCol) continue;
     var noteCols = rosterNoteColumns_(tab);
     if (!noteCols.length) continue;
     var lastRow = tab.getLastRow();
-    if (lastRow < 3) continue;
-    var vals = tab.getRange(3, 1, lastRow - 2, tab.getLastColumn()).getValues();
+    var dataRow = rosterDataRow_(tab);
+    if (lastRow < dataRow) continue;
+    var vals = tab.getRange(dataRow, 1, lastRow - dataRow + 1, tab.getLastColumn()).getValues();
     for (var r = 0; r < vals.length; r++) {
       var sn = String(vals[r][snCol - 1] || '').trim();
       if (!sn) continue;
@@ -901,7 +959,7 @@ function notesToClear_() {
           cart: tab.getName(),
           sn: sn,
           note: note,
-          cell: tab.getRange(r + 3, noteCols[k]).getA1Notation(),
+          cell: tab.getRange(r + dataRow, noteCols[k]).getA1Notation(),
           key: noteKey_(sn, note)
         });
       }
@@ -1037,18 +1095,18 @@ function rebuildRosterTodos_() {
   var tabs = ss.getSheets();
   for (var t = 0; t < tabs.length; t++) {
     var tab = tabs[t];
-    if (mirrorIsProtectedTab_(tab.getName())) continue;
-    if (isHiddenGroup_(tab.getName())) continue;    // cart deleted from the to-do page
+    if (todoIgnoreTab_(tab.getName())) continue;   // not a cart, or removed from the page
     var snCol = rosterSerialColumn_(tab);
     if (!snCol) continue;                          // not a roster tab
     var noteCols = rosterNoteColumns_(tab);
     if (!noteCols.length) continue;
     var numCol = rosterNumberColumn_(tab);
     var tabLastRow = tab.getLastRow();
-    if (tabLastRow < 3) continue;
+    var dataRow = rosterDataRow_(tab);
+    if (tabLastRow < dataRow) continue;
     var tabLastCol = tab.getLastColumn();
-    var heads2 = tab.getRange(2, 1, 1, tabLastCol).getValues()[0];
-    var vals = tab.getRange(3, 1, tabLastRow - 2, tabLastCol).getValues();
+    var heads2 = rosterHeads_(tab);
+    var vals = tab.getRange(dataRow, 1, tabLastRow - dataRow + 1, tabLastCol).getValues();
 
     for (var r = 0; r < vals.length; r++) {
       var sn2 = String(vals[r][snCol - 1] || '').trim();
@@ -1140,6 +1198,7 @@ function rosterCartTabs_() {
     for (var i = 0; i < tabs.length; i++) {
       var tab = tabs[i];
       if (mirrorIsProtectedTab_(tab.getName())) continue;
+      if (isSkippedTab_(tab.getName())) continue;   // per-teacher list, not a cart
       if (!rosterSerialColumn_(tab)) continue;      // not a roster tab
       names.push(tab.getName());
     }
@@ -1168,26 +1227,31 @@ function listCartTabs() {
       Logger.log(pad_(i + 1) + name + '  -- skipped (ticket/todo tab, not roster)');
       continue;
     }
+    if (isSkippedTab_(name)) {
+      Logger.log(pad_(i + 1) + name + '  -- skipped (on TODO_SKIP_TABS, not a cart)');
+      continue;
+    }
     var snCol = rosterSerialColumn_(tab);
     if (!snCol) {
-      // Show what is actually on rows 1 and 2, so a different layout is obvious.
+      // Show the first three rows, so a different layout is obvious.
       var lc = Math.min(tab.getLastColumn(), 8);
-      var r1 = lc ? tab.getRange(1, 1, 1, lc).getValues()[0].join(' | ') : '';
-      var r2 = lc ? tab.getRange(2, 1, 1, lc).getValues()[0].join(' | ') : '';
-      Logger.log(pad_(i + 1) + name + '  -- NOT DETECTED (no "serial" header on row 2)');
-      Logger.log('        row1: ' + r1);
-      Logger.log('        row2: ' + r2);
+      Logger.log(pad_(i + 1) + name + '  -- NOT DETECTED (nothing naming a serial in rows 1-3)');
+      for (var q = 1; q <= Math.min(3, tab.getLastRow()); q++) {
+        Logger.log('        row' + q + ': ' + (lc ? tab.getRange(q, 1, 1, lc).getValues()[0].join(' | ') : ''));
+      }
       continue;
     }
     seen++;
     var noteCols = rosterNoteColumns_(tab);
     var numCol = rosterNumberColumn_(tab);
-    var rows = Math.max(0, tab.getLastRow() - 2);
-    Logger.log(pad_(i + 1) + name + '  -- ok: serial=col' + snCol +
+    var hdrRow = rosterHeaderRow_(tab);
+    var rows = Math.max(0, tab.getLastRow() - hdrRow);
+    Logger.log(pad_(i + 1) + name + '  -- ok: headers=row' + hdrRow +
+               ', serial=col' + snCol +
                ', number=col' + numCol +
                ', notes=col' + (noteCols.length ? noteCols.join('/') : 'NONE') +
                ', ' + rows + ' data row(s)' +
-               (isHiddenGroup_(name) ? '   [HIDDEN on the dashboard]' : ''));
+               (isHiddenGroup_(name) ? '   [REMOVED on the dashboard]' : ''));
   }
   Logger.log('');
   Logger.log(seen + ' tab(s) will show as carts. Hidden: ' +
