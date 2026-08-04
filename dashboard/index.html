@@ -10552,6 +10552,11 @@ function load(fromGate, opts) {
     showApp(true);
     render();
     startAuto();   // (re)start the 15-min clock from the latest load
+    // Pull the Todos sheet straight away rather than waiting for the To-Do tab
+    // to be opened, so the tasks are already there when you get to it. This
+    // only reads the sheet -- importing notes from the master is what Refresh
+    // does, and that is far too slow to run on every page load.
+    loadTodos();
     if (!fromGate) toast((opts.auto ? 'Auto-refreshed — ' : 'Refreshed — ') + tickets.length + ' tickets');
   }).catch(function (err) {
     if (fromGate) gatemsg.textContent = err.message;
