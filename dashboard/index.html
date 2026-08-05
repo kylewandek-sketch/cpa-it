@@ -11070,6 +11070,7 @@ function loadTodos() {
     setServerCarts(res.carts);
     renderTodos();
     loadPendingNotes();
+    validateTodosOnce();
   }).catch(function (err) {
     todosLoading = false;
     toast('To-do load failed: ' + err.message);
@@ -11485,6 +11486,36 @@ function todoSave(params, failMsg) {
       toast(failMsg + ': ' + ((res && res.error) || 'save failed') + ' — refresh');
     }
   }).catch(function (err) { toast(failMsg + ': ' + err.message + ' — refresh'); });
+}
+
+// Checks the stored list still matches the roster workbook, once per page load.
+//
+// Cheap in the ordinary case: the script compares the workbook's last-modified
+// time with the stamp from the last rebuild and answers "already current" in
+// about a second without reading any tabs. It only does the ~50s rebuild when
+// somebody has actually typed a note, or the help desk has written a ticket
+// description into a device row.
+//
+// Runs after the list is already on screen, so it never delays the page. The
+// Refresh button remains the way to force one.
+var validatedThisLoad = false;
+
+function validateTodosOnce() {
+  if (validatedThisLoad) return;
+  validatedThisLoad = true;
+  jsonp({ action: 'validateTodos', token: token }, 240000).then(function (res) {
+    if (!res || res.ok === false) return;          // quiet: this is a background check
+    if (res.fresh) return;                         // nothing had changed
+    todos = res.todos || todos;
+    if (res.hidden) hiddenCarts = res.hidden;
+    setServerCarts(res.carts);
+    renderTodos();
+    loadPendingNotes();
+    var bits = [];
+    if (res.added) bits.push(res.added + ' new');
+    if (res.dropped) bits.push(res.dropped + ' cleared');
+    toast('To-do list brought up to date' + (bits.length ? ' — ' + bits.join(', ') : ''));
+  }).catch(function () { /* background: a failure here must not shout at anyone */ });
 }
 
 // Adding tasks from here was removed when the list became a pure mirror of the

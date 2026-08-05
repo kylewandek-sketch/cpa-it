@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-08-05 native-roster';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-08-05 validate-on-load';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -99,7 +99,7 @@ function doGet(e) {
   var out;
   var guarded = ['list', 'update', 'archiveTest', 'stats', 'lookup', 'notesToClear',
                  'todoList', 'todoAdd', 'todoUpdate', 'todoDelete', 'todoReorder',
-                 'todoHideGroup', 'todoShowGroup', 'refreshTodos'];
+                 'todoHideGroup', 'todoShowGroup', 'refreshTodos', 'validateTodos'];
   if (guarded.indexOf(p.action) >= 0 && p.token !== ADMIN_TOKEN) {
     out = { ok: false, error: 'unauthorized' };
   } else if (p.action === 'list') {
@@ -116,6 +116,8 @@ function doGet(e) {
     out = notesToClear_();
   } else if (p.action === 'refreshTodos') {
     out = refreshTodos_();
+  } else if (p.action === 'validateTodos') {
+    out = validateTodos_(p);
   } else if (p.action === 'todoList') {
     out = todoList_();
   } else if (p.action === 'todoAdd') {
@@ -1080,6 +1082,9 @@ function refreshTodos_() {
 
   rebuildTicketTodos();
   var carts = cartTabsRefresh_();
+  // Mark the list current, so the next dashboard load sees nothing to do.
+  var stamp = rosterStamp_();
+  if (stamp) PropertiesService.getScriptProperties().setProperty(ROSTER_STAMP_KEY, stamp);
   var list = todoList_();
   var tEnd = new Date().getTime();
 
@@ -1090,6 +1095,57 @@ function refreshTodos_() {
            imported: res.imported, kept: res.kept,
            todos: list.todos, hidden: list.hidden,
            carts: carts, timing: timing };
+}
+
+// ---- Validate on load -------------------------------------------------------
+// The dashboard asks for this every time it opens. A full rebuild takes ~50s,
+// which is far too slow to do on every visit -- but almost every visit finds
+// nothing changed, and Drive can tell us that in ONE call.
+//
+// getLastUpdated() on the roster workbook is a single cheap Drive read. Compare
+// it with the stamp from the last rebuild: same means the notes cannot have
+// moved, so the stored list is already correct and we return it as-is in about
+// a second. Different means somebody typed a note, or the help desk wrote a
+// ticket description into a device row, so the rebuild runs.
+//
+// A ticket ALWAYS changes the roster workbook, because rosterNoteWrite_ puts the
+// description in the device's row. So filing a ticket guarantees the next
+// dashboard load rebuilds and picks it up.
+var ROSTER_STAMP_KEY = 'rosterCheckedAt';
+
+function rosterStamp_() {
+  try {
+    return DriveApp.getFileById(ROSTER_SHEET_ID).getLastUpdated().toISOString();
+  } catch (e) {
+    Logger.log('could not read the roster timestamp: ' + e);
+    return '';                      // unknown: fall through and rebuild
+  }
+}
+
+function validateTodos_(p) {
+  var t0 = new Date().getTime();
+  var stamp = rosterStamp_();
+  var props = PropertiesService.getScriptProperties();
+  var seen = props.getProperty(ROSTER_STAMP_KEY);
+
+  if (stamp && stamp === seen && String((p && p.force) || '') !== 'true') {
+    var cur = todoList_();
+    return { ok: true, fresh: true, checked: stamp, ms: new Date().getTime() - t0,
+             todos: cur.todos, hidden: cur.hidden, carts: cur.carts };
+  }
+
+  rosterHeadReset_();
+  var res = rebuildRosterTodos_();
+  rebuildTicketTodos();
+  var carts = cartTabsRefresh_();
+  if (stamp) props.setProperty(ROSTER_STAMP_KEY, stamp);
+  var list = todoList_();
+  var ms = new Date().getTime() - t0;
+  Logger.log('validate: rebuilt in ' + ms + 'ms (' + res.added + ' new, ' + res.removed + ' gone)');
+  return { ok: true, fresh: false, checked: stamp, ms: ms,
+           added: res.added, dropped: res.removed,
+           imported: res.imported, kept: res.kept,
+           todos: list.todos, hidden: list.hidden, carts: carts };
 }
 
 // ---- Full rebuild of the roster-sourced to-dos ------------------------------
@@ -1159,6 +1215,29 @@ function rebuildRosterTodos_() {
   }
 
   // ---- 2. read every roster note ----
+  // A ticket writes its description into the device's row in the roster, and it
+  // already has a ticket- item on the list. Without this the rebuild would
+  // import that same text again as a roster- item and the task would appear
+  // twice. Keyed the same way, so a reworded ticket stops matching and the
+  // roster copy comes back -- which is the right answer, because the text in the
+  // roster is then somebody else's.
+  var ticketNotes = {};
+  try {
+    var tsheet = firstSheet_();
+    var tLast = tsheet.getLastRow();
+    if (tLast > 1) {
+      var tv = tsheet.getRange(2, 1, tLast - 1, HEADERS.length).getValues();
+      for (var ti = 0; ti < tv.length; ti++) {
+        if (String(tv[ti][8] || 'New') === 'Resolved') continue;   // closed: note is cleared
+        var tsn = String(tv[ti][0] || '').trim();
+        var tdesc = String(tv[ti][7] || '').trim();
+        if (tsn && tdesc) ticketNotes[todoStateKey_(tsn, tdesc)] = true;
+      }
+    }
+  } catch (e) {
+    Logger.log('could not read open tickets: ' + e);
+  }
+
   var fresh = [];
   var afterKeys = {};
   var handled = {};
@@ -1199,6 +1278,8 @@ function rebuildRosterTodos_() {
         if (colHead && note.toLowerCase() === colHead.toLowerCase()) continue;
 
         var key2 = todoStateKey_(sn2, note);
+        // An open ticket already covers this exact note on this exact device.
+        if (ticketNotes[key2]) continue;
         // One item per device per note, even where a serial is listed on more
         // than one tab. Two DIFFERENT notes on a device still give two items.
         if (afterKeys[key2]) continue;
