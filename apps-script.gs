@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-08-04 serial-parse + todo-rebuild';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-08-05 native-roster';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -8,19 +8,26 @@ var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token t
 var PHOTO_FOLDER_ID = '1CTMn-eBkvMjUN69ALhYd0UvO71Cc0mUN';
 var PHOTO_FOLDER_FALLBACK = 'CPA IT Ticket Photos';
 
-// Native Google Sheet holding the cart rosters (HS_Cart_1..6, HS_Spares, ...).
-// Roster tabs are auto-detected: serials in column B, with "Serial #" in B2.
-var ROSTER_SHEET_ID = '1FDVE6KtAEf06_zRYQyHyaNZ_9gXsv3JRJGbIwckv4Mw';
+// The roster workbook: cart tabs, the iPad list, everything the to-do page is
+// built from, and the book teachers type their notes into. This IS the master --
+// there is no mirror any more.
+//
+// It used to be a .xlsx on the school account, which SpreadsheetApp cannot open
+// at all, so the script kept a converted copy and synced it. Converting the
+// workbook to a native Sheet on 2026-08-05 removed the need for that: notes now
+// read and write straight through, and a refresh no longer pays for a Drive
+// copy of the whole book.
+//
+// Superseded ids, kept for the record:
+//   1z1W54tWIvm4XlaqsEbyN4slO2HNCD4FO  the original .xlsx (now archived)
+//   1FDVE6KtAEf06_zRYQyHyaNZ_9gXsv3JRJGbIwckv4Mw  the old mirror
+var ROSTER_SHEET_ID = '1WLrGRmlRoaFeg2OrkwP8eXVilkr-LiQRP_RrQrf4d0o';
 
 // ---- Roster note settings ----
 // When a ticket is opened or moved to In Progress, the teacher's "Describe the
-// problem" text is written into the device's row in the master workbook, so the
-// roster itself shows why a device is out. Cleared when the ticket is Resolved.
-//
-// Notes are written into the MIRROR (ROSTER_SHEET_ID), not the master .xlsx --
-// SpreadsheetApp cannot open .xlsx files and this account only has view access
-// to the master anyway. The mirror is refreshed from the master after a ticket
-// comes in; see "Roster mirror" further down.
+// problem" text is written into the device's row, so the roster itself shows why
+// a device is out. Cleared when the ticket is Resolved. This now lands in the
+// workbook people actually open.
 var NOTE_BOOK_ID = ROSTER_SHEET_ID;
 
 // Cart for a to-do item when the serial is not on any roster tab.
@@ -46,18 +53,18 @@ function isSkippedTab_(name) {
 
 // Everything the to-do page should leave alone: ticket/todo tabs, the skip list
 // above, and carts removed from the dashboard.
-function todoIgnoreTab_(name) {
-  return mirrorIsProtectedTab_(name) || isSkippedTab_(name) || isHiddenGroup_(name);
+// Tabs in the roster workbook that are not carts at all. The ticket data and the
+// to-do list live in a different workbook now, but the check is cheap and stops
+// anything odd being read as a roster tab.
+function isNonRosterTab_(name) {
+  var n = String(name || '');
+  if (n === TODO_SHEET_NAME) return true;
+  return n.toLowerCase().indexOf('ticket') >= 0;
 }
 
-// The school-account master workbook. Read-only source for the mirror; nothing
-// is ever written back to it.
-// This is the workbook the cart notes are typed into.
-//   1z1W54tWIvm4XlaqsEbyN4slO2HNCD4FO = "Start of Year ... Check.xlsx" (in use)
-//   1phWbiNeULgv0KVErXiodIoAPp_5FWPnL = "2026-2027 Chromebook Carts/Ipads.xlsx"
-//     -- the assignment roster; holds students, HS carts and the iPad lists,
-//        but not the damage notes
-var MASTER_XLSX_ID = '1z1W54tWIvm4XlaqsEbyN4slO2HNCD4FO';
+function todoIgnoreTab_(name) {
+  return isNonRosterTab_(name) || isSkippedTab_(name) || isHiddenGroup_(name);
+}
 
 // Full column layout. A = Chromebook S/N. Status=9, Notes=10 (unchanged); new cols appended.
 var HEADERS = [
@@ -648,32 +655,10 @@ function rosterHeaderRow_(sh) { return rosterHeadInfo_(sh).row; }
 function rosterHeads_(sh) { return rosterHeadInfo_(sh).heads; }
 function rosterDataRow_(sh) { return rosterHeadInfo_(sh).row + 1; }
 
-// The master's tab order, as recorded by the last sync. mirrorCopyTabs_ walks
-// the converted master in workbook order and stores the names it wrote, so this
-// is the master's order for free -- no extra reads. The mirror's own tab order
-// drifts, because tabs the master gains are appended to the end of it.
-function masterTabOrder_() {
-  try {
-    var v = JSON.parse(PropertiesService.getScriptProperties().getProperty(MIRROR_TABS_KEY) || '[]');
-    return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-// Sort tab names into the master's order. Anything the last sync did not write
-// keeps its relative position at the end rather than being dropped.
-function sortByMasterOrder_(names) {
-  var order = masterTabOrder_();
-  if (!order.length) return names;
-  var rank = {};
-  for (var i = 0; i < order.length; i++) rank[order[i]] = i;
-  return names.slice().sort(function (a, b) {
-    var ra = rank[a] === undefined ? 100000 : rank[a];
-    var rb = rank[b] === undefined ? 100000 : rank[b];
-    return ra - rb;
-  });
-}
+// Tab order is simply the workbook's order now -- getSheets() returns them as
+// they sit in the tab strip. The old version had to reconstruct it from a
+// property the sync wrote, because the mirror's own order drifted.
+function sortByMasterOrder_(names) { return names; }
 
 // Which column on this tab holds the serials.
 function rosterSerialColumn_(sh) { return rosterHeadInfo_(sh).serialCol; }
@@ -734,7 +719,7 @@ function todoAlreadyHas_(todos, sn, note) {
   return false;
 }
 
-// Walk every roster tab in the mirror and put any note found onto the to-do
+// Walk every roster tab and put any note found onto the to-do
 // list. Returns a count; details go to the log.
 function importRosterNotes_() {
   var added = 0;
@@ -811,11 +796,14 @@ function importRosterNotes_() {
   return added;
 }
 
-// A note that has been dealt with. The master .xlsx cannot be written to, so
-// clearing a note in the mirror alone would not stick -- the next sync copies
-// it straight back from the master. Keeping the handled ones on a list stops
-// them being imported again. Editing the note in the master changes its key,
-// so a genuinely new note still comes through.
+// A note that has been dealt with. Kept on a list so it is not imported again
+// while it is still typed in the workbook; editing the note changes its key, so
+// a genuinely new note still comes through.
+//
+// This exists because the roster used to be an .xlsx the script could not write.
+// It can now clear the cell directly, which would make this list and the
+// "notes to clear" report unnecessary -- left in place for now so the switch to
+// the native workbook is one change rather than two.
 var NOTE_DONE_KEY = 'handledRosterNotes';
 var NOTE_DONE_MAX = 500;
 
@@ -939,7 +927,7 @@ function rosterTodoSource_(todo) {
 }
 
 // Square the roster-sourced items with the roster itself:
-//   ticked off  -> clear the cell in the mirror, remember it, drop the item
+//   ticked off  -> clear the cell, remember it, drop the item
 //   cell blank  -> the note is gone, so drop the item
 //   text edited -> update the item to match
 function reconcileRosterTodos_() {
@@ -1063,35 +1051,25 @@ function purgeBogusTodos() {
 // Everything the scheduled job does, on demand from the dashboard's Refresh
 // button, and it hands the finished list straight back so the page does not
 // have to ask again.
-// The mirror sync is FORCED here: pressing Refresh should fetch, not decide the
-// master looks unchanged and skip.
-// Timed per stage. If this ever runs long enough for the page to give up, the
-// log says which stage cost the time rather than leaving it to guesswork.
+// Timed per stage, so a slow one is visible rather than guessed at. There is no
+// mirror sync to pay for any more -- this reads the roster workbook directly.
 function refreshTodos_() {
   var t0 = new Date().getTime();
-  var sync = syncMirror_(true);
-  var tSync = new Date().getTime();
-
-  rosterHeadReset_();                 // the mirror was just rewritten
+  rosterHeadReset_();
   var res = rebuildRosterTodos_();
   var tBuild = new Date().getTime();
 
   rebuildTicketTodos();
-  var carts = cartTabsRefresh_();     // the mirror changed, so re-read the tabs
+  var carts = cartTabsRefresh_();
   var list = todoList_();
   var tEnd = new Date().getTime();
 
-  var timing = {
-    mirrorSync: tSync - t0,
-    rebuild: tBuild - tSync,
-    tickets_carts_list: tEnd - tBuild,
-    total: tEnd - t0
-  };
+  var timing = { rebuild: tBuild - t0, tickets_carts_list: tEnd - tBuild, total: tEnd - t0 };
   Logger.log('refresh timing (ms): ' + JSON.stringify(timing));
 
   return { ok: true, added: res.added, dropped: res.removed,
            imported: res.imported, kept: res.kept,
-           sync: sync, todos: list.todos, hidden: list.hidden,
+           todos: list.todos, hidden: list.hidden,
            carts: carts, timing: timing };
 }
 
@@ -1161,15 +1139,14 @@ function rebuildRosterTodos_() {
     }
   }
 
-  // ---- 2. read every roster note in the mirror ----
+  // ---- 2. read every roster note ----
   var fresh = [];
   var afterKeys = {};
   var handled = {};
   var handledList = handledNotes_();
   for (var q = 0; q < handledList.length; q++) handled[handledList[q]] = true;
 
-  // Walked in the master's tab order, so the Order column the dashboard sorts on
-  // comes out matching the grid rather than the mirror's own tab order.
+  // Walked in workbook order, so the Order column matches the grid.
   var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
   var byName = {};
   ss.getSheets().forEach(function (s) { byName[s.getName()] = s; });
@@ -1260,10 +1237,10 @@ function rebuildRosterTodos_() {
   return { imported: fresh.length, kept: keep.length, added: added, removed: removed };
 }
 
-// Which carts actually exist, by name, straight off the mirror. The dashboard
-// draws its grid from this instead of a hardcoded list, so a tile whose tab has
-// been renamed or deleted stops being drawn, and a tab added to the master
-// turns up on its own.
+// Which carts actually exist, by name, straight off the roster workbook. The
+// dashboard draws its grid from this instead of a hardcoded list, so a tile
+// whose tab has been renamed or deleted stops being drawn, and a tab added to
+// the workbook turns up on its own.
 //
 // Deliberately NOT done by auto-hiding the missing ones: hiddenTodoGroups is
 // permanent, so a cart auto-hidden today would stay suppressed if a tab of the
@@ -1278,7 +1255,7 @@ function rosterCartTabs_() {
     var tabs = ss.getSheets();
     for (var i = 0; i < tabs.length; i++) {
       var tab = tabs[i];
-      if (mirrorIsProtectedTab_(tab.getName())) continue;
+      if (isNonRosterTab_(tab.getName())) continue;
       if (isSkippedTab_(tab.getName())) continue;   // per-teacher list, not a cart
       if (!rosterSerialColumn_(tab)) continue;      // not a roster tab
       names.push(tab.getName());
@@ -1289,10 +1266,10 @@ function rosterCartTabs_() {
   return sortByMasterOrder_(names);   // the grid follows the workbook
 }
 
-// rosterCartTabs_ opens the mirror and walks every tab, which is far too slow to
+// rosterCartTabs_ walks every tab in the roster workbook, which is too slow to
 // do on every todoList call -- that is what the dashboard asks for each time the
 // To-Do tab is opened, and it used to be a quick read of one sheet. The list only
-// changes when the mirror does, so it is worked out on a refresh and parked in a
+// changes when the workbook does, so it is worked out on a refresh and parked in a
 // script property for everything else to read instantly.
 var CART_TABS_KEY = 'cartTabsCache';
 
@@ -1314,24 +1291,23 @@ function cartTabsRefresh_() {
   return names;
 }
 
-// Diagnostic. Lists every tab in the mirror in workbook order and says whether
+// Diagnostic. Lists every tab in the roster workbook in order and says whether
 // the to-do code can see it, so a tab that is missing from the dashboard can be
 // told apart from one that is there but laid out differently.
 //
-// Run it from the editor and read View > Execution log. Sync the mirror first
-// (syncMirrorNow) if the master has changed since the last refresh.
+// Run it from the editor and read View > Execution log.
 function listCartTabs() {
   var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
   var byName = {};
   ss.getSheets().forEach(function (sh) { byName[sh.getName()] = sh; });
   var tabs = sortByMasterOrder_(Object.keys(byName)).map(function (n) { return byName[n]; });
   var seen = 0;
-  Logger.log(tabs.length + ' tab(s) in the mirror, in the master\'s tab order:');
+  Logger.log(tabs.length + ' tab(s) in the roster workbook, in tab order:');
   Logger.log('');
   for (var i = 0; i < tabs.length; i++) {
     var tab = tabs[i];
     var name = tab.getName();
-    if (mirrorIsProtectedTab_(name)) {
+    if (isNonRosterTab_(name)) {
       Logger.log(pad_(i + 1) + name + '  -- skipped (ticket/todo tab, not roster)');
       continue;
     }
@@ -1375,9 +1351,7 @@ function pad_(n) {
 
 // Run by hand in the editor to rebuild without going through the dashboard.
 function rebuildTodosNow() {
-  var sync = syncMirror_(true);
   rosterHeadReset_();
-  Logger.log('mirror sync: ' + JSON.stringify(sync));
   Logger.log(JSON.stringify(rebuildRosterTodos_()));
   rebuildTicketTodos();
   Logger.log('carts: ' + JSON.stringify(cartTabsRefresh_()));
@@ -1391,8 +1365,8 @@ function importRosterNotesNow() {
 }
 
 // Rebuild the ticket-driven items from the ticket sheet: one per open ticket,
-// none for closed ones. Run by hand after a mirror reset, since the cart a
-// serial belongs to is read from the mirror.
+// none for closed ones. The cart a serial belongs to is read from the roster
+// workbook.
 function rebuildTicketTodos() {
   var sheet = firstSheet_();
   var lastRow = sheet.getLastRow();
@@ -1416,219 +1390,18 @@ function rebuildTicketTodos() {
   Logger.log('to-dos rebuilt: ' + open + ' open ticket items, ' + closed + ' closed ones cleared');
 }
 
-// ---- Roster mirror ----------------------------------------------------------
-// The master roster is a .xlsx on the school account, which Apps Script cannot
-// open or write. So a ticket triggers a refresh of the native mirror
-// (ROSTER_SHEET_ID) from that .xlsx: convert a copy, pour the values in tab by
-// tab, put the notes back, and re-lock the tabs.
-//
-// The mirror is DISPOSABLE. Anything typed into it by hand is wiped on the next
-// refresh -- edit the master workbook instead.
-
-var MIRROR_TRIGGER_FN = 'mirrorSyncTrigger';
-var MIRROR_STAMP_KEY = 'mirrorSyncedFrom';   // master's modified time at last sync
-var MIRROR_TABS_KEY = 'mirrorTabs';          // tabs the last sync wrote, JSON array
-
-// Tabs the sync must never write to or delete, whatever the master contains.
-// Ticket data, the to-do list and the monthly archives can live in the same
-// workbook as the mirrored roster, and they are not the master's to overwrite.
-function mirrorIsProtectedTab_(name) {
-  var n = String(name || '');
-  if (n === TODO_SHEET_NAME) return true;
-  if (n.toLowerCase().indexOf('ticket') >= 0) return true;   // Ticketing_System, Jul26_Tickets
-  try {
-    if (n === firstSheet_().getName()) return true;          // the live ticket sheet
-  } catch (e) {}
-  return false;
-}
-
-// Copy the .xlsx into a throw-away native Sheet with the advanced Drive
-// service (editor: Services + > Drive API). It runs on the drive scope this
-// script already holds.
-function mirrorConvertCopy_() {
-  if (typeof Drive === 'undefined' || !Drive.Files || !Drive.Files.copy) {
-    throw new Error('Drive service missing. In the editor: Services + > Drive API.');
-  }
-  var name = 'TEMP roster conversion ' + new Date().getTime();
-  var made;
-  try {
-    made = Drive.Files.copy({ name: name, mimeType: MimeType.GOOGLE_SHEETS }, MASTER_XLSX_ID);
-  } catch (e) {
-    // older advanced service (Drive API v2) calls the field "title"
-    made = Drive.Files.copy({ title: name, mimeType: MimeType.GOOGLE_SHEETS }, MASTER_XLSX_ID);
-  }
-  if (!made || !made.id) throw new Error('Drive.Files.copy returned no id');
-  return made.id;
-}
-
-// Values-only copy of every tab, source -> mirror. Formatting is not carried
-// over; the roster is data, and this keeps the run to a few seconds.
-function mirrorCopyTabs_(fromSs, toSs, pruneAll) {
-  var props = PropertiesService.getScriptProperties();
-  var previous = [];
-  try { previous = JSON.parse(props.getProperty(MIRROR_TABS_KEY) || '[]'); } catch (e) { previous = []; }
-
-  var written = [];
-  var names = {};
-  var from = fromSs.getSheets();
-  for (var i = 0; i < from.length; i++) {
-    var src = from[i];
-    var name = src.getName();
-    if (mirrorIsProtectedTab_(name)) {
-      Logger.log('mirror: leaving "' + name + '" alone (protected)');
-      continue;
-    }
-    names[name] = true;
-    var rows = src.getLastRow();
-    var cols = src.getLastColumn();
-    var dest = toSs.getSheetByName(name);
-    if (!dest) dest = toSs.insertSheet(name);
-    dest.clear();
-    if (rows > 0 && cols > 0) {
-      dest.getRange(1, 1, rows, cols).setValues(src.getRange(1, 1, rows, cols).getValues());
-    }
-    written.push(name);
-  }
-
-  // Normally only tabs a previous sync created are removed -- anything else was
-  // put here by somebody, not by the mirror. A reset prunes everything that is
-  // not in the master, which is how leftovers from an older master go away.
-  var candidates = previous;
-  if (pruneAll) {
-    candidates = [];
-    var have = toSs.getSheets();
-    for (var h = 0; h < have.length; h++) candidates.push(have[h].getName());
-  }
-  for (var k = 0; k < candidates.length; k++) {
-    var old = candidates[k];
-    if (names[old] || mirrorIsProtectedTab_(old)) continue;
-    var sh = toSs.getSheetByName(old);
-    if (sh && toSs.getSheets().length > 1) {
-      var prot = sh.getProtections(SpreadsheetApp.ProtectionType.SHEET);
-      for (var q = 0; q < prot.length; q++) prot[q].remove();
-      toSs.deleteSheet(sh);
-      Logger.log('mirror: removed "' + old + '"');
-    }
-  }
-  props.setProperty(MIRROR_TABS_KEY, JSON.stringify(written));
-  return written.length;
-}
-
-// Lock every tab so only the account running this script can change it. The
-// script itself still writes notes, because it runs as the owner.
-function mirrorProtectTabs_(ss) {
-  var sheets = ss.getSheets();
-  for (var i = 0; i < sheets.length; i++) {
-    if (mirrorIsProtectedTab_(sheets[i].getName())) continue;   // not ours to lock
-    try {
-      var old = sheets[i].getProtections(SpreadsheetApp.ProtectionType.SHEET);
-      for (var j = 0; j < old.length; j++) old[j].remove();
-      var p = sheets[i].protect().setDescription('Mirror of the master workbook - edit the master, not this');
-      p.removeEditors(p.getEditors());
-      if (p.canDomainEdit()) p.setDomainEdit(false);
-    } catch (e) {
-      Logger.log('could not protect ' + sheets[i].getName() + ': ' + e);
-    }
-  }
-}
-
-// A refresh wipes the notes, so write them back for every ticket that is not
-// closed yet.
-function mirrorReapplyNotes_() {
-  var sheet = firstSheet_();
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return 0;
-  var v = sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
-  var n = 0;
-  for (var i = 0; i < v.length; i++) {
-    var status = String(v[i][8] || 'New');
-    if (status === 'Resolved') continue;
-    var r = rosterNoteWrite_(v[i][0], v[i][10], v[i][7]);
-    if (r && r.ok && !r.skipped) n++;
-  }
-  return n;
-}
-
-// Refresh the mirror from the master. Skips when the master has not changed
-// since the last run; pass true to force it.
-function syncMirror_(force, pruneAll) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return { ok: true, skipped: 'another sync is running' };
-  var tempId = null;
-  try {
-    var master = DriveApp.getFileById(MASTER_XLSX_ID);
-    var stamp = master.getLastUpdated().toISOString();
-    var props = PropertiesService.getScriptProperties();
-    if (!force && props.getProperty(MIRROR_STAMP_KEY) === stamp) {
-      return { ok: true, skipped: 'master unchanged' };
-    }
-    tempId = mirrorConvertCopy_();
-    var temp = SpreadsheetApp.openById(tempId);
-    var mirror = SpreadsheetApp.openById(ROSTER_SHEET_ID);
-    var copied = mirrorCopyTabs_(temp, mirror, pruneAll);
-    SpreadsheetApp.flush();
-    var notes = mirrorReapplyNotes_();
-    mirrorProtectTabs_(mirror);
-    props.setProperty(MIRROR_STAMP_KEY, stamp);
-    Logger.log('mirror refreshed from master; tabs copied: ' + copied + ', notes restored: ' + notes);
-    return { ok: true, tabs: copied, notes: notes };
-  } catch (e) {
-    Logger.log('mirror sync failed: ' + e);
-    return { ok: false, error: String(e) };
-  } finally {
-    if (tempId) {
-      try { DriveApp.getFileById(tempId).setTrashed(true); } catch (e2) {}
-    }
-    lock.releaseLock();
-  }
-}
-
-// doPost calls this: books the sync for a minute from now so the teacher's form
-// returns straight away. One pending trigger at a time.
-function scheduleMirrorSync_() {
-  try {
-    var all = ScriptApp.getProjectTriggers();
-    for (var i = 0; i < all.length; i++) {
-      if (all[i].getHandlerFunction() === MIRROR_TRIGGER_FN) return;   // already booked
-    }
-    ScriptApp.newTrigger(MIRROR_TRIGGER_FN).timeBased().after(60 * 1000).create();
-  } catch (e) {
-    Logger.log('could not schedule mirror sync: ' + e);
-  }
-}
-
-// The scheduled handler: clears itself, then syncs.
-function mirrorSyncTrigger() {
-  try {
-    var all = ScriptApp.getProjectTriggers();
-    for (var i = 0; i < all.length; i++) {
-      if (all[i].getHandlerFunction() === MIRROR_TRIGGER_FN) ScriptApp.deleteTrigger(all[i]);
-    }
-  } catch (e) {}
-  syncMirror_(false);
-}
-
-// Run by hand to refresh now, whether or not the master changed.
-function syncMirrorNow() {
-  Logger.log(syncMirror_(true));
-}
-
 // ---- Scheduled refresh ------------------------------------------------------
 // Four times a school day: pull the master across, pick up any notes typed into
 // the carts since, and square the to-do list with the open tickets.
 var TODO_REFRESH_FN = 'scheduledTodoRefresh';
 var TODO_REFRESH_HOURS = [7, 9, 12, 15];        // school time zone, see setupTodoTriggers
 
-// Not forced here: when the master has not changed the mirror is already
-// current, and this runs unattended four times a day.
 function scheduledTodoRefresh() {
-  var sync = syncMirror_(false);
   rosterHeadReset_();
   var res = rebuildRosterTodos_();
   rebuildTicketTodos();
   cartTabsRefresh_();
-  Logger.log('scheduled refresh done. sync: ' + JSON.stringify(sync) +
-             ', roster items: ' + res.imported + ', new: ' + res.added +
+  Logger.log('scheduled refresh done. roster items: ' + res.imported + ', new: ' + res.added +
              ', gone: ' + res.removed + ', kept: ' + res.kept);
 }
 
@@ -1652,54 +1425,32 @@ function setupTodoTriggers() {
              Session.getScriptTimeZone() + ')');
 }
 
-// One-off cleanup. The mirror still carries tabs from an older master, and
-// Lookup searches those too, so stale serials keep resolving. This empties the
-// mirror completely and rebuilds it from the current master.
-//
-// Only the mirror is touched -- tickets, todos and archives are in a different
-// workbook (CPA_Chromebook_Ticketing). If anything goes wrong, the mirror's
-// File > Version history has the previous state.
-function resetMirror() {
-  var props = PropertiesService.getScriptProperties();
-  props.deleteProperty(MIRROR_TABS_KEY);
-  props.deleteProperty(MIRROR_STAMP_KEY);
-
-  // The copy happens first and the pruning second, inside the same run, so a
-  // failure part way through leaves the old mirror in place rather than an
-  // empty workbook.
-  var res = syncMirror_(true, true);
-  Logger.log(res);
-  if (!res.ok) {
-    Logger.log('reset failed, mirror left as it was. Nothing was deleted.');
-  }
-  return res;
-}
-
 // First thing to run when something is not working. Says which version of this
-// file is loaded, who it runs as, and whether the Drive service is available.
+// file is loaded and whether it can read and write the roster workbook.
 function checkSetup() {
-  Logger.log('script version:  ' + SCRIPT_VERSION);
+  Logger.log('script version:   ' + SCRIPT_VERSION);
+  Logger.log('running as:       ' + Session.getEffectiveUser().getEmail());
   try {
-    // owner of the mirror -- the account this script must be running as for the
-    // notes and the tab locks to work
-    Logger.log('mirror owner:    ' + DriveApp.getFileById(ROSTER_SHEET_ID).getOwner().getEmail());
+    var f = DriveApp.getFileById(ROSTER_SHEET_ID);
+    Logger.log('roster workbook:  ' + f.getName());
+    Logger.log('  owner:          ' + f.getOwner().getEmail());
+    Logger.log('  type:           ' + f.getMimeType() +
+               (String(f.getMimeType()).indexOf('google-apps.spreadsheet') >= 0
+                 ? '  (native - notes can be written)'
+                 : '  WRONG - an .xlsx cannot be opened or written'));
   } catch (e) {
-    Logger.log('mirror owner:    (unknown) ' + e);
-  }
-  var hasDrive = (typeof Drive !== 'undefined' && Drive.Files && Drive.Files.copy);
-  Logger.log('Drive service:   ' + (hasDrive ? 'ADDED - conversion will use it' :
-             'MISSING - add it with Services + > Drive API'));
-  try {
-    var f = DriveApp.getFileById(MASTER_XLSX_ID);
-    Logger.log('master file:     ' + f.getName() + ' (' + f.getMimeType() + ')');
-  } catch (e) {
-    Logger.log('master file:     CANNOT READ - ' + e);
+    Logger.log('roster workbook:  CANNOT READ - ' + e);
   }
   try {
     var m = SpreadsheetApp.openById(ROSTER_SHEET_ID);
-    Logger.log('mirror sheet:    ' + m.getName() + ', ' + m.getSheets().length + ' tabs');
+    Logger.log('  tabs:           ' + m.getSheets().length);
+    // Writing is the thing that used to be impossible, so prove it rather than
+    // assume it: set a cell well outside the data and clear it again.
+    var probe = m.getSheets()[0];
+    probe.getRange(1, probe.getMaxColumns()).setValue('write test').clearContent();
+    Logger.log('  write access:   OK');
   } catch (e) {
-    Logger.log('mirror sheet:    CANNOT OPEN - ' + e);
+    Logger.log('  write access:   FAILED - ' + e);
   }
 }
 
@@ -2024,16 +1775,13 @@ function doPost(e) {
     ]);
 
     sendEmail_(data, now, no, photoUrl);
-    // refresh the device's row in the roster mirror with what was typed into
-    // "Describe the problem"; skipped silently if the serial is not on a tab
+    // put what was typed into "Describe the problem" on the device's row in the
+    // roster workbook; skipped silently if the serial is not on a tab
     var note = rosterNoteWrite_(data.sn, no, data.description);
     // put the same text on the to-do list, under the cart the device is in
     var where = null;
     if (note && note.tab) where = { cart: note.tab, cbNo: note.cbNo };
     ticketTodoWrite_(data.sn, no, data.description, where);
-    // and pull any roster changes across from the master, a minute from now, so
-    // the teacher's form is not left waiting on it
-    scheduleMirrorSync_();
     return jsonOut_({ ok: true, ticketNo: no });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err) });
@@ -2162,7 +1910,7 @@ function badSerialRows_() {
     var sh = tabs[t];
     var name = sh.getName();
     // Ticket data only: the live sheet and the monthly archives. Not the Todos
-    // tab, not anything mirrored.
+    // tab, and not the roster workbook.
     if (name !== live && name.toLowerCase().indexOf('ticket') < 0) continue;
     var lastRow = sh.getLastRow();
     if (lastRow < 2) continue;
