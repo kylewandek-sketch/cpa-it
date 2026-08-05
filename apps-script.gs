@@ -5,7 +5,7 @@ var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token t
 
 // Drive folder that ticket photos are saved into. The account running this script
 // must have EDIT access to it. Falls back to a folder on the script's own Drive.
-var PHOTO_FOLDER_ID = '1CTMn-eBkvMjUN69ALhYd0UvO71Cc0mUN';
+var PHOTO_FOLDER_ID = '1rhGgLWy4W9i1U-EcfcAf9ZBbzuNWotCb';   // "Ticket Images"
 var PHOTO_FOLDER_FALLBACK = 'CPA IT Ticket Photos';
 
 // The roster workbook: cart tabs, the iPad list, everything the to-do page is
@@ -22,6 +22,23 @@ var PHOTO_FOLDER_FALLBACK = 'CPA IT Ticket Photos';
 //   1z1W54tWIvm4XlaqsEbyN4slO2HNCD4FO  the original .xlsx (now archived)
 //   1FDVE6KtAEf06_zRYQyHyaNZ_9gXsv3JRJGbIwckv4Mw  the old mirror
 var ROSTER_SHEET_ID = '1WLrGRmlRoaFeg2OrkwP8eXVilkr-LiQRP_RrQrf4d0o';
+
+// The workbook holding tickets, the Todos tab, the ClosedLog and the monthly
+// archives. Addressed BY ID rather than through getActiveSpreadsheet(), so the
+// data can live in the shared IT folder while the script itself stays bound to
+// wherever it was created -- the bound container is what owns the deployment and
+// the /exec URL the dashboard and the help-desk form talk to, and that must not
+// move.
+//
+// Script properties (lastTicketNo, hiddenTodoGroups, handledRosterNotes,
+// cartTabsCache) belong to the SCRIPT, not the workbook, so ticket numbering and
+// settings carry across unaffected.
+var TICKET_BOOK_ID = '12CcT0FHlILSGqABfpsK9sRAs2D2YnWZmHR4RYe8dUZA';
+
+function ticketBook_() { return SpreadsheetApp.openById(TICKET_BOOK_ID); }
+
+// The assignment roster, for reference. Nothing reads it yet.
+//   1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ  "2026-2027 Chromebook Carts/Ipads"
 
 // ---- Roster note settings ----
 // When a ticket is opened or moved to In Progress, the teacher's "Describe the
@@ -126,7 +143,7 @@ function doGet(e) {
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
-function firstSheet_() { return SpreadsheetApp.getActiveSpreadsheet().getSheets()[0]; }
+function firstSheet_() { return ticketBook_().getSheets()[0]; }
 
 function ensureHeaders_(sheet) {
   var cur = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
@@ -239,7 +256,7 @@ function openCount_(p) {
 
 // Lifetime aggregates across the live sheet AND every archive tab.
 function stats_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = ticketBook_();
   var byDevice = {}, byStudent = {}, resSum = 0, resCount = 0;
   ss.getSheets().forEach(function (sh) {
     var lr = sh.getLastRow();
@@ -315,7 +332,7 @@ function deviceLookup_(p) {
 
   // 2) Ticket history — S/N is column A in the live sheet and every archive tab.
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var ss = ticketBook_();
     ss.createTextFinder(sn).matchEntireCell(true).findAll().forEach(function (rng) {
       if (rng.getColumn() !== 1) return;
       var sh = rng.getSheet();
@@ -338,7 +355,7 @@ function deviceLookup_(p) {
   //    Only matches tasks that actually contain the serial - cart-level items
   //    without a serial in the text will not show here.
   try {
-    var ts = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TODO_SHEET_NAME);
+    var ts = ticketBook_().getSheetByName(TODO_SHEET_NAME);
     if (ts) {
       ts.createTextFinder(sn).findAll().forEach(function (rng) {
         if (rng.getColumn() !== 2) return;   // task text lives in column B
@@ -840,7 +857,7 @@ var CLOSED_LOG_HEADERS = ['Closed At', 'Item ID', 'Note', 'S/N', 'Cart', 'How'];
 var CLOSED_LOG_DAYS = 7;
 
 function closedLogSheet_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = ticketBook_();
   var sh = ss.getSheetByName(CLOSED_LOG_SHEET);
   if (!sh) {
     sh = ss.insertSheet(CLOSED_LOG_SHEET, ss.getNumSheets());
@@ -1425,33 +1442,67 @@ function setupTodoTriggers() {
              Session.getScriptTimeZone() + ')');
 }
 
-// First thing to run when something is not working. Says which version of this
-// file is loaded and whether it can read and write the roster workbook.
+// First thing to run when something is not working, and the thing to run after
+// any of the three ids above change. Proves each one can actually be reached and
+// written, rather than assuming it.
 function checkSetup() {
   Logger.log('script version:   ' + SCRIPT_VERSION);
   Logger.log('running as:       ' + Session.getEffectiveUser().getEmail());
+  Logger.log('');
+
+  // ---- roster workbook: read + write ----
   try {
-    var f = DriveApp.getFileById(ROSTER_SHEET_ID);
-    Logger.log('roster workbook:  ' + f.getName());
-    Logger.log('  owner:          ' + f.getOwner().getEmail());
-    Logger.log('  type:           ' + f.getMimeType() +
-               (String(f.getMimeType()).indexOf('google-apps.spreadsheet') >= 0
-                 ? '  (native - notes can be written)'
-                 : '  WRONG - an .xlsx cannot be opened or written'));
+    var rf = DriveApp.getFileById(ROSTER_SHEET_ID);
+    Logger.log('roster workbook:  ' + rf.getName());
+    Logger.log('  owner:          ' + rf.getOwner().getEmail());
+    var native = String(rf.getMimeType()).indexOf('google-apps.spreadsheet') >= 0;
+    Logger.log('  type:           ' + rf.getMimeType() +
+               (native ? '  (native)' : '  WRONG - an .xlsx cannot be opened or written'));
+    var rs = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+    Logger.log('  tabs:           ' + rs.getSheets().length);
+    var rp = rs.getSheets()[0];
+    rp.getRange(1, rp.getMaxColumns()).setValue('write test').clearContent();
+    Logger.log('  write access:   OK  (ticket notes can be written)');
   } catch (e) {
-    Logger.log('roster workbook:  CANNOT READ - ' + e);
+    Logger.log('  roster:         FAILED - ' + e);
   }
+  Logger.log('');
+
+  // ---- ticket workbook: read + write, and the tabs the code expects ----
   try {
-    var m = SpreadsheetApp.openById(ROSTER_SHEET_ID);
-    Logger.log('  tabs:           ' + m.getSheets().length);
-    // Writing is the thing that used to be impossible, so prove it rather than
-    // assume it: set a cell well outside the data and clear it again.
-    var probe = m.getSheets()[0];
-    probe.getRange(1, probe.getMaxColumns()).setValue('write test').clearContent();
+    var tf = DriveApp.getFileById(TICKET_BOOK_ID);
+    Logger.log('ticket workbook:  ' + tf.getName());
+    Logger.log('  owner:          ' + tf.getOwner().getEmail());
+    var ts = ticketBook_();
+    var names = ts.getSheets().map(function (sh) { return sh.getName(); });
+    Logger.log('  tabs:           ' + names.join(', '));
+    Logger.log('  ticket sheet:   ' + firstSheet_().getName() +
+               '  (' + Math.max(0, firstSheet_().getLastRow() - 1) + ' ticket row(s))');
+    Logger.log('  Todos tab:      ' + (names.indexOf(TODO_SHEET_NAME) >= 0
+                 ? todoList_().todos.length + ' item(s)' : 'MISSING - will be created'));
+    var tp = ts.getSheets()[0];
+    tp.getRange(1, tp.getMaxColumns()).setValue('write test').clearContent();
     Logger.log('  write access:   OK');
   } catch (e) {
-    Logger.log('  write access:   FAILED - ' + e);
+    Logger.log('  ticket book:    FAILED - ' + e);
   }
+  Logger.log('');
+
+  // ---- photo folder: read + write ----
+  try {
+    var pf = DriveApp.getFolderById(PHOTO_FOLDER_ID);
+    Logger.log('photo folder:     ' + pf.getName());
+    Logger.log('  owner:          ' + pf.getOwner().getEmail());
+    var probe = pf.createFile(Utilities.newBlob('cpa-it test', 'text/plain', 'cpa-it-test.txt'));
+    probe.setTrashed(true);
+    Logger.log('  write access:   OK  (ticket photos will save here)');
+  } catch (e) {
+    Logger.log('  photo folder:   FAILED - ' + e);
+    Logger.log('  share it as Editor with the account above, then run again.');
+  }
+  Logger.log('');
+  Logger.log('ticket counter:   lastTicketNo = ' +
+             (PropertiesService.getScriptProperties().getProperty('lastTicketNo') || '(unset, starts at 1001)'));
 }
 
 // Run this by hand against a real serial to see where a note would land.
@@ -1473,7 +1524,7 @@ var TODO_STATUSES = ['Untouched', 'Noticed', 'Working', 'Stalled', 'Progressing'
 var TODO_STATUS_DEFAULT = 'Untouched';
 
 function todoSheet_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = ticketBook_();
   var sh = ss.getSheetByName(TODO_SHEET_NAME);
   if (!sh) {
     sh = ss.insertSheet(TODO_SHEET_NAME, ss.getNumSheets());
@@ -1720,7 +1771,7 @@ function setupMonthlyArchive() {
 }
 function archiveMonthly() { archiveCopy_(true); }
 function archiveCopy_(clear) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = ticketBook_();
   var src = ss.getSheets()[0];
   var lastRow = src.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'No tickets to archive.' };
@@ -1890,7 +1941,7 @@ function listBadSerials() {
 }
 
 function fixStoredSerials() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = ticketBook_();
   var found = badSerialRows_();
   for (var i = 0; i < found.length; i++) {
     ss.getSheetByName(found[i].tab).getRange(found[i].row, 1).setValue(found[i].now);
@@ -1903,7 +1954,7 @@ function fixStoredSerials() {
 
 function badSerialRows_() {
   var out = [];
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = ticketBook_();
   var live = firstSheet_().getName();
   var tabs = ss.getSheets();
   for (var t = 0; t < tabs.length; t++) {
