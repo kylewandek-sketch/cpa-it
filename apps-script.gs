@@ -1406,10 +1406,41 @@ function debugTab() {
     return;
   }
 
+  // The rebuild keeps one item per device per note across the WHOLE workbook,
+  // first tab in order wins. So a tab can be read correctly and still yield
+  // nothing, because an earlier tab already claimed its devices. Work out who
+  // claimed what, walking in the same order and stopping at this tab.
+  var claimed = {};
+  var byName = {};
+  ss.getSheets().forEach(function (x) { byName[x.getName()] = x; });
+  var ordered = sortByMasterOrder_(Object.keys(byName));
+  for (var o = 0; o < ordered.length && ordered[o] !== name; o++) {
+    var other = byName[ordered[o]];
+    if (todoIgnoreTab_(ordered[o])) continue;
+    var oSn = rosterSerialColumn_(other);
+    var oCols = rosterNoteColumns_(other);
+    if (!oSn || !oCols.length) continue;
+    var oData = rosterDataRow_(other);
+    var oLast = other.getLastRow();
+    if (oLast < oData) continue;
+    var oVals = other.getRange(oData, 1, oLast - oData + 1, other.getLastColumn()).getValues();
+    for (var or = 0; or < oVals.length; or++) {
+      var osn = String(oVals[or][oSn - 1] || '').trim();
+      if (!looksLikeRosterSerial_(osn)) continue;
+      for (var ok = 0; ok < oCols.length; ok++) {
+        var oraw = oVals[or][oCols[ok] - 1];
+        if (!isRealNote_(oraw)) continue;
+        var okey = todoStateKey_(osn, String(oraw).trim());
+        if (!claimed[okey]) claimed[okey] = ordered[o];
+      }
+    }
+  }
+
   var lastRow = tab.getLastRow();
   var vals = tab.getRange(dataRow, 1, lastRow - dataRow + 1, tab.getLastColumn()).getValues();
   var wouldImport = 0;
   var badSerials = 0;
+  var suppressed = 0;
   for (var r = 0; r < vals.length; r++) {
     var row = r + dataRow;
     var sn = String(vals[r][info.serialCol - 1] || '').trim();
@@ -1426,14 +1457,29 @@ function debugTab() {
                    '" (' + typeof raw + ') not treated as a note');
         continue;
       }
+      var key = todoStateKey_(sn, String(raw).trim());
+      if (claimed[key]) {
+        suppressed++;
+        Logger.log('  row ' + row + ' col' + noteCols[k] + ': SUPPRESSED "' + String(raw).trim() +
+                   '"  sn=' + sn + '  -- already imported under "' + claimed[key] + '"');
+        continue;
+      }
       wouldImport++;
-      Logger.log('  row ' + row + ' col' + noteCols[k] + ': IMPORT "' + String(raw).trim() + '"');
+      Logger.log('  row ' + row + ' col' + noteCols[k] + ': IMPORT "' + String(raw).trim() +
+                 '"  sn=' + sn);
     }
   }
   Logger.log('');
   Logger.log('  ' + wouldImport + ' item(s) would be imported, ' +
+             suppressed + ' suppressed as duplicates of an earlier tab, ' +
              badSerials + ' row(s) skipped for an unusable serial, ' +
              'out of ' + vals.length + ' row(s) read from row ' + dataRow + ' down.');
+  if (suppressed) {
+    Logger.log('');
+    Logger.log('  A suppressed note means the SAME serial carries the SAME note on an');
+    Logger.log('  earlier tab. Two tabs listing one physical device is a roster problem,');
+    Logger.log('  not a code one -- decide which cart the device belongs to.');
+  }
 }
 
 // Run by hand in the editor to rebuild without going through the dashboard.
