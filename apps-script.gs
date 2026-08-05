@@ -1368,6 +1368,74 @@ function pad_(n) {
   return s + '. ';
 }
 
+// Why a tab produced the items it did -- or none. listCartTabs says whether a
+// tab is SEEN; this says what the importer makes of every row on it, and gives
+// the reason each cell was passed over.
+//
+// Edit the name below and run it from the editor. No redeploy needed; this is
+// never called by the web app.
+function debugTab() {
+  var name = 'Cart E';                 // <-- the tab to examine
+
+  var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
+  var tab = ss.getSheetByName(name);
+  if (!tab) {
+    Logger.log('There is no tab named "' + name + '" in the roster workbook.');
+    return;
+  }
+  rosterHeadReset_();
+  var info = rosterHeadInfo_(tab);
+  var noteCols = rosterNoteColumns_(tab);
+  var numCol = rosterNumberColumn_(tab);
+  var dataRow = rosterDataRow_(tab);
+
+  Logger.log('tab "' + name + '"');
+  Logger.log('  skipped entirely?  ' + (todoIgnoreTab_(name) ? 'YES' : 'no'));
+  Logger.log('  header row         ' + (info.row || 'none, data from row 1'));
+  Logger.log('  serial column      ' + (info.serialCol || 'NOT FOUND'));
+  Logger.log('  number column      ' + numCol);
+  Logger.log('  headers            ' + info.heads.join(' | '));
+  Logger.log('  note columns       ' + (noteCols.length ? noteCols.join(', ') : 'NONE'));
+  Logger.log('');
+
+  if (!info.serialCol || !noteCols.length) {
+    Logger.log('  Nothing can be imported: a tab needs both a serial column and');
+    Logger.log('  at least one note column. Note columns are col 3 or later whose');
+    Logger.log('  header is blank or contains note/issue/repair/comment/problem/');
+    Logger.log('  damage/broken/status, and never one containing "student".');
+    return;
+  }
+
+  var lastRow = tab.getLastRow();
+  var vals = tab.getRange(dataRow, 1, lastRow - dataRow + 1, tab.getLastColumn()).getValues();
+  var wouldImport = 0;
+  var badSerials = 0;
+  for (var r = 0; r < vals.length; r++) {
+    var row = r + dataRow;
+    var sn = String(vals[r][info.serialCol - 1] || '').trim();
+    if (!looksLikeRosterSerial_(sn)) {
+      badSerials++;
+      if (sn) Logger.log('  row ' + row + ': serial "' + sn + '" rejected - whole row skipped');
+      continue;
+    }
+    for (var k = 0; k < noteCols.length; k++) {
+      var raw = vals[r][noteCols[k] - 1];
+      if (raw === '' || raw === null || raw === undefined) continue;   // blank, unremarkable
+      if (!isRealNote_(raw)) {
+        Logger.log('  row ' + row + ' col' + noteCols[k] + ': "' + String(raw) +
+                   '" (' + typeof raw + ') not treated as a note');
+        continue;
+      }
+      wouldImport++;
+      Logger.log('  row ' + row + ' col' + noteCols[k] + ': IMPORT "' + String(raw).trim() + '"');
+    }
+  }
+  Logger.log('');
+  Logger.log('  ' + wouldImport + ' item(s) would be imported, ' +
+             badSerials + ' row(s) skipped for an unusable serial, ' +
+             'out of ' + vals.length + ' row(s) read from row ' + dataRow + ' down.');
+}
+
 // Run by hand in the editor to rebuild without going through the dashboard.
 function rebuildTodosNow() {
   rosterHeadReset_();
