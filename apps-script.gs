@@ -39,10 +39,8 @@ var TICKET_BOOK_ID = '12CcT0FHlILSGqABfpsK9sRAs2D2YnWZmHR4RYe8dUZA';
 
 function ticketBook_() { return SpreadsheetApp.openById(TICKET_BOOK_ID); }
 
-// The assignment roster: which cart each device belongs to. Holds no damage
-// notes, so it cannot drive the to-do list -- but it settles which cart owns a
-// device when two tabs claim the same one. Read only by whereIsSerial().
-var ASSIGNMENT_SHEET_ID = '1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ';
+// The assignment roster, for reference. Nothing reads it yet.
+//   1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ  "2026-2027 Chromebook Carts/Ipads"
 
 // ---- Roster note settings ----
 // When a ticket is opened or moved to In Progress, the teacher's "Describe the
@@ -1509,54 +1507,6 @@ function listCartTabsIn() {
   Logger.log(tabs.length + ' tab(s): ' + carts + ' look like rosters, ' +
              withNotes + ' of those have a note column.');
   Logger.log('A workbook with no note columns cannot drive the to-do list.');
-}
-
-// Where a device actually lives. Searches BOTH workbooks for each serial and
-// reports every tab it appears on, so a device listed on two carts is obvious
-// and the assignment roster can settle which one is right.
-//
-// Edit the list below and run it from the editor. Reads only.
-function whereIsSerial() {
-  var serials = [
-    'NXHBNAA001925272B27600',
-    'NXHBNAA00191610B437600',
-    'NXH8VAA006039313577611'
-  ];
-
-  var books = [
-    ['assignment roster (which cart owns it)', ASSIGNMENT_SHEET_ID],
-    ['check workbook (where notes are typed)', ROSTER_SHEET_ID]
-  ];
-
-  for (var b = 0; b < books.length; b++) {
-    var label = books[b][0], id = books[b][1];
-    var ss;
-    try {
-      ss = SpreadsheetApp.openById(id);
-    } catch (e) {
-      Logger.log(label + ': CANNOT OPEN - ' + e);
-      continue;
-    }
-    Logger.log('== ' + label + ' :: ' + ss.getName() + ' ==');
-    for (var i = 0; i < serials.length; i++) {
-      var sn = String(serials[i]).trim();
-      var hits = [];
-      try {
-        ss.createTextFinder(sn).matchEntireCell(true).findAll().forEach(function (rng) {
-          hits.push(rng.getSheet().getName() + ' row ' + rng.getRow());
-        });
-      } catch (e2) {
-        hits.push('search failed: ' + e2);
-      }
-      if (!hits.length) Logger.log('  ' + sn + '  -- not found');
-      else if (hits.length === 1) Logger.log('  ' + sn + '  -- ' + hits[0]);
-      else Logger.log('  ' + sn + '  -- ON ' + hits.length + ' TABS: ' + hits.join('  |  '));
-    }
-    Logger.log('');
-  }
-  Logger.log('A serial on two cart tabs in the CHECK workbook is why a note can go');
-  Logger.log('missing from one of them: the rebuild keeps one item per device, and');
-  Logger.log('the earlier tab wins. The assignment roster says which cart is right.');
 }
 
 // Why a tab produced the items it did -- or none. listCartTabs says whether a
