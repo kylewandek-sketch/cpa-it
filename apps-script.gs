@@ -1368,6 +1368,43 @@ function pad_(n) {
   return s + '. ';
 }
 
+// Run listCartTabs against a DIFFERENT workbook, to see whether it holds carts
+// and notes the to-do page could be built from. Reads only; changes nothing.
+//
+// Edit the id below and run it from the editor.
+function listCartTabsIn() {
+  var id = '1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ';   // <-- workbook to examine
+
+  var ss = SpreadsheetApp.openById(id);
+  Logger.log('workbook: ' + DriveApp.getFileById(id).getName());
+  Logger.log('');
+  rosterHeadReset_();
+  var tabs = ss.getSheets();
+  var carts = 0, withNotes = 0;
+  for (var i = 0; i < tabs.length; i++) {
+    var tab = tabs[i];
+    var name = tab.getName();
+    var snCol = rosterSerialColumn_(tab);
+    if (!snCol) {
+      Logger.log(pad_(i + 1) + name + '  -- no serial column, not a roster tab');
+      continue;
+    }
+    carts++;
+    var noteCols = rosterNoteColumns_(tab);
+    if (noteCols.length) withNotes++;
+    var hdrRow = rosterHeaderRow_(tab);
+    Logger.log(pad_(i + 1) + name + '  -- headers=' + (hdrRow ? 'row' + hdrRow : 'none') +
+               ', serial=col' + snCol +
+               ', notes=col' + (noteCols.length ? noteCols.join('/') : 'NONE') +
+               ', ' + Math.max(0, tab.getLastRow() - hdrRow) + ' data row(s)' +
+               (isSkippedTab_(name) ? '   [on TODO_SKIP_TABS]' : ''));
+  }
+  Logger.log('');
+  Logger.log(tabs.length + ' tab(s): ' + carts + ' look like rosters, ' +
+             withNotes + ' of those have a note column.');
+  Logger.log('A workbook with no note columns cannot drive the to-do list.');
+}
+
 // Why a tab produced the items it did -- or none. listCartTabs says whether a
 // tab is SEEN; this says what the importer makes of every row on it, and gives
 // the reason each cell was passed over.
