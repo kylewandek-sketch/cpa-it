@@ -945,7 +945,7 @@ function closedHistory_() {
 // Where a roster-sourced to-do came from: id is roster-<serial>-<column>, and
 // the cart tab is the item's group.
 function rosterTodoSource_(todo) {
-  var m = String(todo.id || '').match(/^roster-(.+)-(\d+)$/);
+  var m = String(todo.id || '').match(ROSTER_ID_RE);
   if (!m) return null;
   var sn = m[1];
   var col = parseInt(m[2], 10);
@@ -1192,7 +1192,8 @@ function validateTodos_(p) {
 //
 // Status and Done are carried across on a key of serial + note text, which
 // survives the note moving tab or column -- a rebuild should not throw away
-// work you did on an item that is still there.
+// work you did on an item that is still there. That key ignores the tab, so two
+// tabs showing the same note share one status: it is one physical problem.
 
 // The trailing "  (CB #4 · S/N ABC123)" that deviceTag_ adds, so the original
 // note text can be recovered from a stored label.
@@ -1202,9 +1203,17 @@ function todoStateKey_(sn, noteText) {
   return noteKey_(sn, String(noteText).replace(TODO_TAG_RE, '').trim());
 }
 
-// Serial out of a roster- id. Ids are roster-<serial>-<column>.
+// Ids are roster-<serial>-<column>-<sheetId>. The sheet id is what keeps two
+// tabs carrying the same note on the same device apart -- without it both rows
+// would claim the same id and only one could exist.
+//
+// The serial is matched non-greedily and the two numeric parts anchor the end.
+// Serials are letters and digits only (see looksLikeRosterSerial_), so they
+// cannot swallow the numbers.
+var ROSTER_ID_RE = /^roster-(.+?)-(\d+)-(\d+)$/;
+
 function todoIdSerial_(id) {
-  var m = String(id || '').match(/^roster-(.+)-(\d+)$/);
+  var m = String(id || '').match(ROSTER_ID_RE);
   return m ? m[1] : '';
 }
 
@@ -1215,7 +1224,7 @@ function rebuildRosterTodos_() {
   // ---- 1. read the sheet as it stands, raw, so Created survives ----
   var keep = [];        // ticket- rows only; everything else is rebuilt
   var before = {};      // state key -> { done, status }
-  var beforeKeys = {};
+  var beforeIds = {};   // ids that were on the list, for the changed counts
   var lastRow = sh.getLastRow();
   if (lastRow > 1) {
     var rows = sh.getRange(2, 1, lastRow - 1, width).getValues();
@@ -1231,9 +1240,23 @@ function rebuildRosterTodos_() {
       if (!sn) continue;
       var st = String(rows[i][6] || '').trim();
       if (TODO_STATUSES.indexOf(st) < 0) st = TODO_STATUS_DEFAULT;
+      // Two tabs can carry the same note on the same device, so several rows can
+      // share one state key. Merge rather than let the last one read win, or the
+      // copy you marked Working would be reset by the copy you had not touched.
+      // Furthest-along status wins, and done on either counts as done.
       var key = todoStateKey_(sn, rows[i][1]);
-      before[key] = { done: (rows[i][2] === true || rows[i][2] === 'TRUE'), status: st };
-      beforeKeys[key] = true;
+      var cand = { done: (rows[i][2] === true || rows[i][2] === 'TRUE'), status: st };
+      var held = before[key];
+      if (!held) {
+        before[key] = cand;
+      } else {
+        before[key] = {
+          done: held.done || cand.done,
+          status: TODO_STATUSES.indexOf(cand.status) > TODO_STATUSES.indexOf(held.status)
+                    ? cand.status : held.status
+        };
+      }
+      beforeIds[id] = true;
     }
   }
 
@@ -1262,7 +1285,7 @@ function rebuildRosterTodos_() {
   }
 
   var fresh = [];
-  var afterKeys = {};
+  var afterIds = {};
   var handled = {};
   var handledList = handledNotes_();
   for (var q = 0; q < handledList.length; q++) handled[handledList[q]] = true;
@@ -1303,22 +1326,29 @@ function rebuildRosterTodos_() {
         var key2 = todoStateKey_(sn2, note);
         // An open ticket already covers this exact note on this exact device.
         if (ticketNotes[key2]) continue;
-        // One item per device per note, even where a serial is listed on more
-        // than one tab. Two DIFFERENT notes on a device still give two items.
-        if (afterKeys[key2]) continue;
-        afterKeys[key2] = true;
 
+        // EVERY tab that carries a note gets its own item, even when the same
+        // device carries the same note on another tab. A device listed on two
+        // carts is a roster matter; the to-do page's job is to show what each
+        // tab actually says, so both carts show the work.
+        var id2 = 'roster-' + sn2 + '-' + noteCols[k] + '-' + tab.getSheetId();
+        if (afterIds[id2]) continue;              // same cell twice: impossible, but cheap
+        afterIds[id2] = true;
+
+        // Status is keyed on serial + note text, deliberately WITHOUT the tab:
+        // two copies of one note share a status, and renaming a tab does not
+        // reset it.
         var prev = before[key2] || { done: false, status: TODO_STATUS_DEFAULT };
 
         // A note that was ticked off but is still typed in the master belongs on
         // the "notes to clear" report. Log it once, not on every refresh.
         if (prev.done && !handled[noteKey_(sn2, note)]) {
           markNoteHandled_(sn2, note);
-          logClosed_('roster-' + sn2 + '-' + noteCols[k], note, sn2, tab.getName(), 'ticked off');
+          logClosed_(id2, note, sn2, tab.getName(), 'ticked off');
           handled[noteKey_(sn2, note)] = true;
         }
 
-        fresh.push(['roster-' + sn2 + '-' + noteCols[k],
+        fresh.push([id2,
                     note + deviceTag_(cbNo, sn2),
                     prev.done,
                     0,                             // order filled in below
@@ -1351,8 +1381,8 @@ function rebuildRosterTodos_() {
   // ---- 4. count what actually moved, for the dashboard toast ----
   var added = 0;
   var removed = 0;
-  for (var ka in afterKeys) { if (!beforeKeys[ka]) added++; }
-  for (var kb in beforeKeys) { if (!afterKeys[kb]) removed++; }
+  for (var ka in afterIds) { if (!beforeIds[ka]) added++; }
+  for (var kb in beforeIds) { if (!afterIds[kb]) removed++; }
 
   Logger.log('todo rebuild: ' + fresh.length + ' roster item(s) from the master, ' +
              keep.length + ' ticket item(s) kept, ' +
@@ -1547,41 +1577,10 @@ function debugTab() {
     return;
   }
 
-  // The rebuild keeps one item per device per note across the WHOLE workbook,
-  // first tab in order wins. So a tab can be read correctly and still yield
-  // nothing, because an earlier tab already claimed its devices. Work out who
-  // claimed what, walking in the same order and stopping at this tab.
-  var claimed = {};
-  var byName = {};
-  ss.getSheets().forEach(function (x) { byName[x.getName()] = x; });
-  var ordered = sortByMasterOrder_(Object.keys(byName));
-  for (var o = 0; o < ordered.length && ordered[o] !== name; o++) {
-    var other = byName[ordered[o]];
-    if (todoIgnoreTab_(ordered[o])) continue;
-    var oSn = rosterSerialColumn_(other);
-    var oCols = rosterNoteColumns_(other);
-    if (!oSn || !oCols.length) continue;
-    var oData = rosterDataRow_(other);
-    var oLast = other.getLastRow();
-    if (oLast < oData) continue;
-    var oVals = other.getRange(oData, 1, oLast - oData + 1, other.getLastColumn()).getValues();
-    for (var or = 0; or < oVals.length; or++) {
-      var osn = String(oVals[or][oSn - 1] || '').trim();
-      if (!looksLikeRosterSerial_(osn)) continue;
-      for (var ok = 0; ok < oCols.length; ok++) {
-        var oraw = oVals[or][oCols[ok] - 1];
-        if (!isRealNote_(oraw)) continue;
-        var okey = todoStateKey_(osn, String(oraw).trim());
-        if (!claimed[okey]) claimed[okey] = ordered[o];
-      }
-    }
-  }
-
   var lastRow = tab.getLastRow();
   var vals = tab.getRange(dataRow, 1, lastRow - dataRow + 1, tab.getLastColumn()).getValues();
   var wouldImport = 0;
   var badSerials = 0;
-  var suppressed = 0;
   for (var r = 0; r < vals.length; r++) {
     var row = r + dataRow;
     var sn = String(vals[r][info.serialCol - 1] || '').trim();
@@ -1598,13 +1597,6 @@ function debugTab() {
                    '" (' + typeof raw + ') not treated as a note');
         continue;
       }
-      var key = todoStateKey_(sn, String(raw).trim());
-      if (claimed[key]) {
-        suppressed++;
-        Logger.log('  row ' + row + ' col' + noteCols[k] + ': SUPPRESSED "' + String(raw).trim() +
-                   '"  sn=' + sn + '  -- already imported under "' + claimed[key] + '"');
-        continue;
-      }
       wouldImport++;
       Logger.log('  row ' + row + ' col' + noteCols[k] + ': IMPORT "' + String(raw).trim() +
                  '"  sn=' + sn);
@@ -1612,15 +1604,8 @@ function debugTab() {
   }
   Logger.log('');
   Logger.log('  ' + wouldImport + ' item(s) would be imported, ' +
-             suppressed + ' suppressed as duplicates of an earlier tab, ' +
              badSerials + ' row(s) skipped for an unusable serial, ' +
              'out of ' + vals.length + ' row(s) read from row ' + dataRow + ' down.');
-  if (suppressed) {
-    Logger.log('');
-    Logger.log('  A suppressed note means the SAME serial carries the SAME note on an');
-    Logger.log('  earlier tab. Two tabs listing one physical device is a roster problem,');
-    Logger.log('  not a code one -- decide which cart the device belongs to.');
-  }
 }
 
 // Run by hand in the editor to rebuild without going through the dashboard.
