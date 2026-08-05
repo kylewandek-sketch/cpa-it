@@ -1449,7 +1449,13 @@ function setupTodoTriggers() {
 // written, rather than assuming it.
 function checkSetup() {
   Logger.log('script version:   ' + SCRIPT_VERSION);
-  Logger.log('running as:       ' + Session.getEffectiveUser().getEmail());
+  try {
+    // Needs the userinfo.email scope. Useful to know, but never worth failing
+    // the whole diagnostic over.
+    Logger.log('running as:       ' + Session.getEffectiveUser().getEmail());
+  } catch (e) {
+    Logger.log('running as:       (add the userinfo.email scope to see this)');
+  }
   Logger.log('');
 
   // ---- roster workbook: read + write ----
