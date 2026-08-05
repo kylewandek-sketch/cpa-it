@@ -1539,6 +1539,137 @@ function listCartTabsIn() {
   Logger.log('A workbook with no note columns cannot drive the to-do list.');
 }
 
+// ---- Cross-workbook comparison ---------------------------------------------
+// Reads all three books and reports where they disagree. Editor-only, reads
+// only, and slow (~100 tabs) -- run it from the editor, not the web app.
+//
+// Cart names are normalised before comparing: a leading "C-" is Kyle's marker
+// for "beginning-of-year check done" and means nothing structurally, and the
+// iPad tab is spelled differently in each book.
+var COMPARE_ASSIGNMENT_ID = '1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ';
+
+function normCart_(name) {
+  var n = String(name || '').trim().toLowerCase();
+  n = n.replace(/^c-\s*/, '');            // "C-Cart A" -> "cart a"
+  n = n.replace(/[^a-z0-9]/g, '');        // "iPad's" / "Ipads" -> "ipads"
+  return n;
+}
+
+// serial -> [tab names], for every roster-shaped tab in a workbook
+function serialMap_(id, skipNonCarts) {
+  var out = { byserial: {}, tabs: [], error: '' };
+  var ss;
+  try { ss = SpreadsheetApp.openById(id); }
+  catch (e) { out.error = String(e); return out; }
+  rosterHeadReset_();
+  var tabs = ss.getSheets();
+  for (var i = 0; i < tabs.length; i++) {
+    var tab = tabs[i], name = tab.getName();
+    if (isNonRosterTab_(name)) continue;
+    if (skipNonCarts && isSkippedTab_(name)) continue;
+    var snCol = rosterSerialColumn_(tab);
+    if (!snCol) continue;
+    var dataRow = rosterDataRow_(tab), last = tab.getLastRow();
+    if (last < dataRow) continue;
+    out.tabs.push(name);
+    var vals = tab.getRange(dataRow, snCol, last - dataRow + 1, 1).getValues();
+    for (var r = 0; r < vals.length; r++) {
+      var sn = String(vals[r][0] || '').trim();
+      if (!looksLikeRosterSerial_(sn)) continue;
+      var key = sn.toUpperCase();
+      if (!out.byserial[key]) out.byserial[key] = [];
+      if (out.byserial[key].indexOf(name) < 0) out.byserial[key].push(name);
+    }
+  }
+  return out;
+}
+
+function cap_(list, n) {
+  if (list.length <= n) return list;
+  return list.slice(0, n).concat(['... and ' + (list.length - n) + ' more']);
+}
+
+function compareBooks() {
+  Logger.log('reading the assignment roster...');
+  var A = serialMap_(COMPARE_ASSIGNMENT_ID, false);
+  Logger.log('reading the check workbook...');
+  var C = serialMap_(ROSTER_SHEET_ID, false);
+  if (A.error) { Logger.log('assignment roster: ' + A.error); return; }
+  if (C.error) { Logger.log('check workbook: ' + C.error); return; }
+
+  Logger.log('');
+  Logger.log('================ WORKBOOK COMPARISON ================');
+  Logger.log('assignment roster : ' + A.tabs.length + ' roster tabs, ' +
+             Object.keys(A.byserial).length + ' distinct serials');
+  Logger.log('check workbook    : ' + C.tabs.length + ' roster tabs, ' +
+             Object.keys(C.byserial).length + ' distinct serials');
+  Logger.log('');
+
+  // ---- 1. tabs present in one book but not the other ----
+  var an = {}, cn = {};
+  A.tabs.forEach(function (t) { an[normCart_(t)] = t; });
+  C.tabs.forEach(function (t) { cn[normCart_(t)] = t; });
+  var onlyA = [], onlyC = [];
+  for (var k in an) if (!cn[k]) onlyA.push(an[k]);
+  for (var k2 in cn) if (!an[k2]) onlyC.push(cn[k2]);
+  Logger.log('--- tabs only in the assignment roster (' + onlyA.length + ') ---');
+  cap_(onlyA.sort(), 25).forEach(function (t) { Logger.log('    ' + t); });
+  Logger.log('--- tabs only in the check workbook (' + onlyC.length + ') ---');
+  cap_(onlyC.sort(), 25).forEach(function (t) { Logger.log('    ' + t); });
+  Logger.log('');
+
+  // ---- 2. devices in one book but not the other ----
+  var missC = [], missA = [], moved = [];
+  for (var sn in A.byserial) {
+    if (!C.byserial[sn]) { missC.push(sn + '  (' + A.byserial[sn].join(', ') + ')'); continue; }
+    var a0 = normCart_(A.byserial[sn][0]), c0 = normCart_(C.byserial[sn][0]);
+    if (a0 !== c0) moved.push(sn + '   roster: ' + A.byserial[sn].join('/') +
+                              '   check: ' + C.byserial[sn].join('/'));
+  }
+  for (var sn2 in C.byserial) if (!A.byserial[sn2]) missA.push(sn2 + '  (' + C.byserial[sn2].join(', ') + ')');
+
+  Logger.log('--- in the assignment roster but NOT the check workbook (' + missC.length + ') ---');
+  cap_(missC.sort(), 40).forEach(function (x) { Logger.log('    ' + x); });
+  Logger.log('');
+  Logger.log('--- in the check workbook but NOT the assignment roster (' + missA.length + ') ---');
+  cap_(missA.sort(), 40).forEach(function (x) { Logger.log('    ' + x); });
+  Logger.log('');
+  Logger.log('--- on DIFFERENT carts in the two books (' + moved.length + ') ---');
+  cap_(moved.sort(), 40).forEach(function (x) { Logger.log('    ' + x); });
+  Logger.log('');
+
+  // ---- 3. a serial on more than one tab, within a book ----
+  function dupes(m, label) {
+    var d = [];
+    for (var sn in m.byserial) if (m.byserial[sn].length > 1) d.push(sn + '  ' + m.byserial[sn].join(' | '));
+    Logger.log('--- listed on several tabs in the ' + label + ' (' + d.length + ') ---');
+    cap_(d.sort(), 30).forEach(function (x) { Logger.log('    ' + x); });
+    Logger.log('');
+  }
+  dupes(A, 'assignment roster');
+  dupes(C, 'check workbook');
+
+  // ---- 4. the to-do list against the check workbook ----
+  var todos = todoList_().todos;
+  var badCart = [], badSerial = [];
+  var cartNames = {};
+  C.tabs.forEach(function (t) { cartNames[t] = true; });
+  for (var i = 0; i < todos.length; i++) {
+    var t = todos[i];
+    if (String(t.id).indexOf('roster-') !== 0) continue;
+    if (t.group && !cartNames[t.group]) badCart.push(t.group + ' :: ' + t.text);
+    var m = String(t.text).match(/S\/N\s+([A-Za-z0-9]+)\)/);
+    if (m && !C.byserial[m[1].toUpperCase()]) badSerial.push(m[1] + ' :: ' + t.text);
+  }
+  Logger.log('--- to-do items on a cart that no longer exists (' + badCart.length + ') ---');
+  cap_(badCart.sort(), 25).forEach(function (x) { Logger.log('    ' + x); });
+  Logger.log('');
+  Logger.log('--- to-do items whose serial is not in the check workbook (' + badSerial.length + ') ---');
+  cap_(badSerial.sort(), 25).forEach(function (x) { Logger.log('    ' + x); });
+  Logger.log('');
+  Logger.log('================ END ================');
+}
+
 // Why a tab produced the items it did -- or none. listCartTabs says whether a
 // tab is SEEN; this says what the importer makes of every row on it, and gives
 // the reason each cell was passed over.
