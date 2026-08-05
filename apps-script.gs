@@ -24,15 +24,17 @@ var PHOTO_FOLDER_FALLBACK = 'CPA IT Ticket Photos';
 var ROSTER_SHEET_ID = '1WLrGRmlRoaFeg2OrkwP8eXVilkr-LiQRP_RrQrf4d0o';
 
 // The workbook holding tickets, the Todos tab, the ClosedLog and the monthly
-// archives. Addressed BY ID rather than through getActiveSpreadsheet(), so the
-// data can live in the shared IT folder while the script itself stays bound to
-// wherever it was created -- the bound container is what owns the deployment and
-// the /exec URL the dashboard and the help-desk form talk to, and that must not
-// move.
+// archives, in the shared IT folder.
+//
+// Reached by id, never through getActiveSpreadsheet(). That is what lets this
+// script be a STANDALONE project rather than one bound inside a spreadsheet --
+// a bound script is part of its container file and cannot be moved out of it,
+// so the container could never be deleted.
 //
 // Script properties (lastTicketNo, hiddenTodoGroups, handledRosterNotes,
-// cartTabsCache) belong to the SCRIPT, not the workbook, so ticket numbering and
-// settings carry across unaffected.
+// cartTabsCache) belong to the SCRIPT PROJECT, not to any workbook. They do not
+// follow the data, and they do not survive being copied into a new project --
+// see the migration notes in the repo if this project is ever recreated.
 var TICKET_BOOK_ID = '12CcT0FHlILSGqABfpsK9sRAs2D2YnWZmHR4RYe8dUZA';
 
 function ticketBook_() { return SpreadsheetApp.openById(TICKET_BOOK_ID); }
