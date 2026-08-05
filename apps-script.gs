@@ -147,7 +147,30 @@ function doGet(e) {
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
-function firstSheet_() { return ticketBook_().getSheets()[0]; }
+// The ticket sheet, found by its header rather than by position.
+//
+// This was getSheets()[0], so dragging any tab in front of it would silently
+// send tickets to the wrong sheet -- and it has already been renamed once, from
+// Ticketing_System to Don't_Touch, which shows the name is not dependable
+// either. A1 holding "Chromebook S/N" is the thing that actually identifies it.
+//
+// Cached per execution: this is called on every ticket read and write.
+var TICKET_SHEET_CACHE = null;
+
+function firstSheet_() {
+  if (TICKET_SHEET_CACHE) return TICKET_SHEET_CACHE;
+  var sheets = ticketBook_().getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (String(sheets[i].getRange(1, 1).getValue() || '').trim() === HEADERS[0]) {
+      TICKET_SHEET_CACHE = sheets[i];
+      return TICKET_SHEET_CACHE;
+    }
+  }
+  TICKET_SHEET_CACHE = sheets[0];        // nothing matched: behave as it always did
+  Logger.log('WARNING: no tab has "' + HEADERS[0] + '" in A1; falling back to "' +
+             TICKET_SHEET_CACHE.getName() + '" as the ticket sheet.');
+  return TICKET_SHEET_CACHE;
+}
 
 function ensureHeaders_(sheet) {
   var cur = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
@@ -2012,7 +2035,7 @@ function setupMonthlyArchive() {
 function archiveMonthly() { archiveCopy_(true); }
 function archiveCopy_(clear) {
   var ss = ticketBook_();
-  var src = ss.getSheets()[0];
+  var src = firstSheet_();               // by header, not by position
   var lastRow = src.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'No tickets to archive.' };
   var lastCol = Math.max(HEADERS.length, src.getLastColumn());
