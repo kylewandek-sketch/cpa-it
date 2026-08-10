@@ -154,6 +154,18 @@
                   display:flex; align-items:center; justify-content:center;
                   user-select:none; -webkit-user-select:none; }
   .pending-meta { font-size:11.5px; color:var(--red); opacity:.85; margin-top:3px; }
+  /* Loaner notes are bookkeeping, not repairs, so they get their own block
+     inside the cart panel rather than sitting among the actual faults. */
+  .todo-sec { list-style:none; margin:16px 0 2px; font-size:12px; font-weight:700;
+              letter-spacing:.4px; text-transform:uppercase; color:var(--muted); }
+  .todo-sec:first-child { margin-top:0; }
+  .todo-sec .secnote { display:block; margin-top:3px; font-size:11.5px; font-weight:400;
+                       letter-spacing:0; text-transform:none; }
+  .todo-item.loan { background:rgba(70,120,210,.07); border-color:rgba(70,120,210,.35); }
+  .cart-card .loanonly { color:var(--muted); font-weight:600; }
+  .loan-chip { display:inline-block; margin-left:8px; font-size:11px; font-weight:700;
+               padding:1px 7px; border-radius:999px; vertical-align:1px;
+               background:rgba(70,120,210,.16); color:#3b6fc4; white-space:nowrap; }
   .pill-todo { display:inline-block; font-size:11.5px; font-weight:600; padding:2px 8px;
                border-radius:999px; background:rgba(210,50,40,.15); color:var(--red); white-space:nowrap; }
   .pill-done { display:inline-block; font-size:11.5px; font-weight:600; padding:2px 8px;
@@ -11223,15 +11235,34 @@ function isHiddenCart(name) {
   return false;
 }
 
+// A heading row inside the task list. Not a .todo-item, so drag-to-reorder
+// steps straight over it.
+function todoSection(title, note) {
+  var li = document.createElement('li');
+  li.className = 'todo-sec';
+  var html = esc(title);
+  if (note) html += '<span class="secnote">' + esc(note) + '</span>';
+  li.innerHTML = html;
+  return li;
+}
+
 function buildTodoItem(t) {
   var li = document.createElement('li');
   li.className = 'todo-item';
   if (t.done) li.className = 'todo-item done';
+  var kind = loanNoteKind(t.text);
+  if (kind === 'loaner') li.className += ' loan';
   li.setAttribute('data-id', t.id);
   li.setAttribute('draggable', 'false');   // turned on only when the handle is grabbed
+  // A fault that also names a loaner keeps its place in the task list; the chip
+  // is there so it is obvious a replacement has already gone out.
+  var chip = '';
+  if (kind === 'mixed') {
+    chip = '<span class="loan-chip" title="This note also records a loaner">loaner</span>';
+  }
   li.innerHTML =
     '<span class="handle" title="Drag to reorder">⠿</span>' +
-    '<div class="txt">' + esc(t.text) + '</div>' +
+    '<div class="txt">' + esc(t.text) + chip + '</div>' +
     '<div class="acts">' +
       todoStatusSelect(t) +
       '<button class="todo-del" title="Delete">✕</button>' +
@@ -11308,6 +11339,85 @@ function groupItems(g) {
   return todos.filter(function (t) { return groupOf(t) === g; });
 }
 
+// ---- Loaner notes vs actual faults ------------------------------------------
+// The cart tabs carry two very different kinds of note in the same column. Some
+// describe something wrong with a device ("Screen broken", "no charger") and
+// some only record that a device was moved -- "F4 Loaner", "W1 from cart W", or
+// a bare placement line of label + serial + student. Only the first kind is a
+// job for somebody; the second kind is bookkeeping, and it was burying the real
+// tasks. Both still show, just in separate blocks.
+//
+// The rule was worked out against the 204 distinct notes actually sitting in
+// the master workbook's note columns: 90 turned out to be loaner-only, 8 carry
+// a fault AND a loaner, and 106 are ordinary faults.
+
+// Words that mean a device was moved rather than broken.
+var LOAN_WORD_RE = /\b(loaner|loaners|loaning|loan|loaned|reassigned|relabled|relabeled)\b/i;
+var LOAN_CART_RE = /\b(from|to)\s+cart\s+[a-z]\b/i;
+// A device label: one or two letters then one or two digits -- D16, S26, W11.
+var LOAN_LABEL_RE = /^[a-z]{1,2}\d{1,2}$/i;
+// Words that mean something is actually wrong. Only consulted for notes that
+// already look loaner-ish, so it never has to judge an ordinary note.
+var LOAN_FAULT_RE = /\b(broken|break|crack\w*|screen|charg\w*|key\w*|hinge|port|jack|casing|chass\w*|power|batter\w*|dead|loose|stuck|missing|damag\w*|repair\w*|replac\w*|working|work|turn|browser|pad|plastic|cover|speaker|camera|wifi|slow|freez\w*|ticket)\b/i;
+// Filler that says nothing on its own.
+var LOAN_SKIP_WORDS = ['the', 'and', 'for', 'was', 'not', 'with', 'this', 'that',
+                       'from', 'cart', 'unit', 'has', 'had', 'all', 'one', 'side', 'correct'];
+
+function loanTokens(text) {
+  return String(text || '').split(/[^A-Za-z0-9]+/).filter(function (w) { return w.length > 0; });
+}
+
+// A serial: long, letters and digits mixed, no punctuation. A fault note never
+// contains one; a placement record always does.
+function loanLooksLikeSerial(word) {
+  if (word.length < 6) return false;
+  if (!/^[A-Za-z0-9]+$/.test(word)) return false;
+  if (!/[0-9]/.test(word)) return false;
+  if (!/[A-Za-z]/.test(word)) return false;
+  return true;
+}
+
+// 'loaner'  the whole note is a device movement
+// 'mixed'   a real fault that also mentions a loaner -- stays with the tasks
+// 'fault'   an ordinary task
+function loanNoteKind(text) {
+  var s = String(text || '');
+  var words = loanTokens(s);
+  var hasSerial = false;
+  var hasLabel = false;
+  for (var i = 0; i < words.length; i++) {
+    if (loanLooksLikeSerial(words[i])) hasSerial = true;
+    if (LOAN_LABEL_RE.test(words[i])) hasLabel = true;
+  }
+  var placement = hasSerial && hasLabel;
+  if (!LOAN_WORD_RE.test(s) && !LOAN_CART_RE.test(s) && !placement) return 'fault';
+
+  // Take out the loaner phrasing and see whether anything is left that says
+  // something. "Out Screen broken. Loaner S26" leaves "Screen broken", so it is
+  // still a fault. "F4 Loaner" leaves nothing, so it is only a loaner note.
+  var rest = s.replace(/\([^)]*\b(loan|loaning|loaner)\b[^)]*\)/ig, ' ');
+  rest = rest.replace(/\b(loaner|loaners|loaning|loan|loaned|reassigned|relabled|relabeled)\b/ig, ' ');
+  rest = rest.replace(/\b(from|to)\s+cart\s+[a-z]\b/ig, ' ');
+  rest = rest.replace(/\bcart\s+[a-z]\b/ig, ' ');
+  rest = rest.replace(/[^A-Za-z0-9 ]/g, ' ');
+
+  var left = [];
+  var pieces = rest.split(/\s+/);
+  for (var k = 0; k < pieces.length; k++) {
+    var w = pieces[k];
+    if (!w) continue;
+    if (w.length < 3) continue;
+    if (/^\d+$/.test(w)) continue;
+    if (LOAN_LABEL_RE.test(w)) continue;
+    if (loanLooksLikeSerial(w)) continue;
+    if (LOAN_SKIP_WORDS.indexOf(w.toLowerCase()) >= 0) continue;
+    left.push(w);
+  }
+  if (!left.length) return 'loaner';
+  if (LOAN_FAULT_RE.test(left.join(' '))) return 'mixed';
+  return 'loaner';                 // what is left is a student name, not a fault
+}
+
 function renderTodos() {
   renderCartGrid();
   renderPanel();
@@ -11319,9 +11429,13 @@ function renderCartGrid() {
   var names = allGroups();
   if (todoSortMode === 'most') {
     // Highest open count first; ties keep cart order.
+    // Counts real tasks, not loaner notes -- a cart of pure bookkeeping should
+    // not push a cart with actual repairs down the page.
     var openCount = {};
     names.forEach(function (g) {
-      openCount[g] = groupItems(g).length;
+      var n = 0;
+      groupItems(g).forEach(function (t) { if (loanNoteKind(t.text) !== 'loaner') n++; });
+      openCount[g] = n;
     });
     var indexed = names.map(function (g, i) { return { g: g, i: i }; });
     indexed.sort(function (a, b) {
@@ -11340,12 +11454,21 @@ function renderCartGrid() {
     if (g === selectedGroup) card.classList.add('active');
 
     var pendingHere = pendingForCart(g).length;
+    // The tile counts real work. Loaner notes are shown beside it so the tile
+    // and the panel agree, without a cart of pure bookkeeping looking busy.
+    var loanHere = 0;
+    items.forEach(function (t) { if (loanNoteKind(t.text) === 'loaner') loanHere++; });
+    var taskHere = open - loanHere;
     var count;
     if (items.length === 0) {
       card.classList.add('empty');
       count = '0 items';
+    } else if (taskHere === 0) {
+      card.classList.add('empty');
+      count = '<span class="loanonly">' + loanHere + ' loaner</span>';
     } else {
-      count = '<b>' + open + '</b> to-do';
+      count = '<b>' + taskHere + '</b> to-do';
+      if (loanHere > 0) count += '<span class="loanonly"> · ' + loanHere + ' loaner</span>';
     }
     if (pendingHere > 0) {
       count += '<span class="pending-badge" title="Notes to delete from the master workbook">' +
@@ -11402,14 +11525,32 @@ function renderPanel() {
   panel.classList.remove('hidden');
 
   var items = groupItems(selectedGroup);
+
+  // Split the cart's notes: real work first, loaner bookkeeping after it. A note
+  // that carries both stays with the tasks, so a fault is never filed away.
+  var tasks = [];
+  var loaners = [];
+  items.forEach(function (t) {
+    if (loanNoteKind(t.text) === 'loaner') loaners.push(t);
+    else tasks.push(t);
+  });
+
   document.getElementById('tpName').textContent = selectedGroup;
-  var label = items.length + ' task';
-  if (items.length !== 1) label += 's';
+  var label = tasks.length + ' task';
+  if (tasks.length !== 1) label += 's';
+  if (loaners.length) label += ' · ' + loaners.length + ' loaner';
+  if (loaners.length > 1) label += 's';
   document.getElementById('tpCount').textContent = label;
 
   var ul = document.getElementById('todoList');
   ul.innerHTML = '';
-  items.forEach(function (t) { ul.appendChild(buildTodoItem(t)); });
+  if (loaners.length && tasks.length) ul.appendChild(todoSection('Tasks'));
+  tasks.forEach(function (t) { ul.appendChild(buildTodoItem(t)); });
+  if (loaners.length) {
+    ul.appendChild(todoSection('Loaner notes',
+      'Devices moved in or out of this cart. No repair needed.'));
+    loaners.forEach(function (t) { ul.appendChild(buildTodoItem(t)); });
+  }
 
   // closed here, still sitting in the master workbook
   var pending = pendingForCart(selectedGroup);

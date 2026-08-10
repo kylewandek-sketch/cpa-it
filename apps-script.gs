@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-08-05 validate-on-load';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-08-10 lookup-from-assignment-roster';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -39,8 +39,15 @@ var TICKET_BOOK_ID = '12CcT0FHlILSGqABfpsK9sRAs2D2YnWZmHR4RYe8dUZA';
 
 function ticketBook_() { return SpreadsheetApp.openById(TICKET_BOOK_ID); }
 
-// The assignment roster, for reference. Nothing reads it yet.
-//   1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ  "2026-2027 Chromebook Carts/Ipads"
+// The assignment roster: "2026-2027 Chromebook Carts/Ipads". Same cart tabs as
+// the check workbook above, but this is the book that says who a device belongs
+// to -- row 1 is "TEACHER: <name>" / "ROOM# <n>", row 2 is the headers, and
+// column C is the assigned student.
+//
+// The dashboard's Lookup tab reads its assignment section from HERE. Notes, the
+// to-do list and everything else still come from ROSTER_SHEET_ID; this book has
+// no note columns.
+var ASSIGNMENT_SHEET_ID = '1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ';
 
 // ---- Roster note settings ----
 // When a ticket is opened or moved to In Progress, the teacher's "Describe the
@@ -316,14 +323,26 @@ function stats_() {
 // Given a serial: where it lives (cart/teacher/room/Chromebook #/student) + every
 // past ticket for it (live sheet + all archive tabs). Uses createTextFinder so the
 // search happens in one optimized pass per workbook rather than tab-by-tab.
+// Row 1 of an assignment tab holds "TEACHER: Messer" in A1 and "ROOM# 13" in B1.
+// The dashboard already prints its own "Teacher:" and "Room:" labels, so strip
+// the one baked into the cell. A tab with a bare name in A1 is left alone.
+function stripRosterLabel_(value) {
+  var s = String(value || '').trim();
+  s = s.replace(/^teacher\s*#?\s*:?\s*/i, '');
+  s = s.replace(/^room\s*#?\s*:?\s*/i, '');
+  return s.trim();
+}
+
 function deviceLookup_(p) {
   var sn = serialFromScan_(p.sn);
   if (!sn) return { ok: false, error: 'No serial provided.' };
   var out = { ok: true, sn: sn, assignments: [], tickets: [], todos: [] };
 
-  // 1) Roster assignment — serials live in column B of tabs whose B2 says "Serial #".
+  // 1) Roster assignment — read from the ASSIGNMENT workbook, not the check
+  //    workbook: that is the book that says who a device belongs to. Serials
+  //    live in column B of tabs whose B2 says "Serial #".
   try {
-    var rs = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+    var rs = SpreadsheetApp.openById(ASSIGNMENT_SHEET_ID);
     rs.createTextFinder(sn).matchEntireCell(true).findAll().forEach(function (rng) {
       if (rng.getColumn() !== 2) return;                 // ignore non-serial columns
       var sh = rng.getSheet();
@@ -349,8 +368,8 @@ function deviceLookup_(p) {
       }
       out.assignments.push({
         cart: sh.getName(),
-        teacher: String(heads[0][0] || ''),
-        room: String(heads[0][1] || ''),
+        teacher: stripRosterLabel_(heads[0][0]),
+        room: stripRosterLabel_(heads[0][1]),
         chromebookNo: String(vals[0] || ''),
         students: students
       });
@@ -1507,7 +1526,7 @@ function pad_(n) {
 //
 // Edit the id below and run it from the editor.
 function listCartTabsIn() {
-  var id = '1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ';   // <-- workbook to examine
+  var id = ASSIGNMENT_SHEET_ID;   // <-- workbook to examine
 
   var ss = SpreadsheetApp.openById(id);
   Logger.log('workbook: ' + DriveApp.getFileById(id).getName());
@@ -1546,7 +1565,7 @@ function listCartTabsIn() {
 // Cart names are normalised before comparing: a leading "C-" is Kyle's marker
 // for "beginning-of-year check done" and means nothing structurally, and the
 // iPad tab is spelled differently in each book.
-var COMPARE_ASSIGNMENT_ID = '1JQxgBqWzrwg58okUJT39L1xv_MbmoPLNPdh31IjD1DQ';
+var COMPARE_ASSIGNMENT_ID = ASSIGNMENT_SHEET_ID;
 
 function normCart_(name) {
   var n = String(name || '').trim().toLowerCase();
@@ -1844,6 +1863,19 @@ function checkSetup() {
     Logger.log('  write access:   OK  (ticket notes can be written)');
   } catch (e) {
     Logger.log('  roster:         FAILED - ' + e);
+  }
+  Logger.log('');
+
+  // ---- assignment roster: read only (the Lookup tab's assignment section) ----
+  try {
+    var af = DriveApp.getFileById(ASSIGNMENT_SHEET_ID);
+    Logger.log('assignment book:  ' + af.getName());
+    Logger.log('  owner:          ' + af.getOwner().getEmail());
+    var assignSs = SpreadsheetApp.openById(ASSIGNMENT_SHEET_ID);
+    Logger.log('  tabs:           ' + assignSs.getSheets().length);
+    Logger.log('  read access:    OK  (Lookup can find assignments)');
+  } catch (e) {
+    Logger.log('  assignment:     FAILED - ' + e);
   }
   Logger.log('');
 
