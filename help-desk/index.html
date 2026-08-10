@@ -10484,7 +10484,7 @@ var submitbtn = document.getElementById('submitbtn');
 // all-digit entry is usually the short SNID barcode, not the S/N.
 function looksLikeSerial(sn) {
   var s = String(sn || '').replace(/[\s-]+/g, '').toUpperCase();
-  if (s.length < 8 || s.length > 24) return false;
+  if (s.length < 7 || s.length > 24) return false;   // Dell service tags are 7
   if (!/^[A-Z0-9]+$/.test(s)) return false;
   if (!/[A-Z]/.test(s)) return false;
   if (!/[0-9]/.test(s)) return false;

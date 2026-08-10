@@ -35,6 +35,8 @@
   th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; opacity: .6; }
   td.sn { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; }
   tr.dupe { opacity: .45; }
+  /* scanned, but it does not read like a Chromebook serial */
+  tr.odd td.sn { color: #d13438; }
   .count { font-size: 13px; opacity: .7; margin: 8px 0; }
   .rmbtn { border: none; background: transparent; color: #d13438; cursor: pointer; font-size: 16px; padding: 0 6px; }
   select { padding: 6px; border-radius: 6px; }
@@ -10304,11 +10306,16 @@ function render() {
   rowsEl.innerHTML = '';
   records.forEach(function (r, i) {
     var tr = document.createElement('tr');
+    if (r.odd) {
+      tr.className = 'odd';
+      tr.title = 'This does not look like a Chromebook serial. ' + CHECK_LABEL_MSG;
+    }
     tr.innerHTML = '<td>' + (i + 1) + '</td>' +
       '<td class="sn"></td>' +
       '<td>' + r.time + '</td>' +
       '<td><button class="rmbtn" title="Remove">&times;</button></td>';
-    tr.querySelector('.sn').textContent = r.data;
+    if (r.odd) tr.querySelector('.sn').textContent = r.data + '  ⚠';
+    else tr.querySelector('.sn').textContent = r.data;
     tr.querySelector('.rmbtn').onclick = function () {
       delete seen[r.data];
       records.splice(i, 1);
@@ -10374,6 +10381,23 @@ function serialFromScan(raw) {
   return s;
 }
 
+// Same plausibility test the help desk form uses before it will submit a
+// ticket. Chromebook and iPad serials run 8 to 24 characters, letters and
+// digits only, and always contain both -- an all-digit read is usually the
+// short SNID barcode beside the S/N, not the serial itself.
+// help-desk/index.html has the same function; keep them in step.
+function looksLikeSerial(sn) {
+  var s = String(sn || '').replace(/[\s-]+/g, '').toUpperCase();
+  if (s.length < 7 || s.length > 24) return false;   // Dell service tags are 7
+  if (!/^[A-Z0-9]+$/.test(s)) return false;
+  if (!/[A-Z]/.test(s)) return false;
+  if (!/[0-9]/.test(s)) return false;
+  return true;
+}
+
+var CHECK_LABEL_MSG = 'Check the S/N printed on the device label — it is the longer code of ' +
+                      'letters and numbers, usually on the sticker underneath the Chromebook.';
+
 function addCode(data) {
   data = serialFromScan(data);
   if (!data) return;
@@ -10389,11 +10413,17 @@ function addCode(data) {
   var hh = String(t.getHours()).padStart(2, '0');
   var mm = String(t.getMinutes()).padStart(2, '0');
   var ss = String(t.getSeconds()).padStart(2, '0');
-  records.push({ data: data, time: hh + ':' + mm + ':' + ss });
+  // The help desk stops and asks about an implausible serial, but that form
+  // takes one device at a time. Here a dialog every few seconds would wreck a
+  // cart run, so the row is kept and flagged instead -- it still goes in the
+  // CSV, it just arrives marked so it can be checked before the sheet is used.
+  var odd = !looksLikeSerial(data);
+  records.push({ data: data, time: hh + ':' + mm + ':' + ss, odd: odd });
   render();
   signalCapture(data);
   lastHit = now;
-  setStatus('Added #' + records.length + ': ' + data, 'ok');
+  if (odd) setStatus('Added #' + records.length + ': ' + data + ' — this does not look like a serial. ' + CHECK_LABEL_MSG, 'err');
+  else setStatus('Added #' + records.length + ': ' + data, 'ok');
 }
 
 // Prefer native BarcodeDetector, fall back to embedded jsQR.
@@ -10509,6 +10539,11 @@ async function start() {
 
 startbtn.onclick = start;
 camsel.onchange = function () { if (stream) start(); };
+
+// Populate the camera list at load, the way the help desk form does. Labels
+// stay blank until permission is granted -- start() calls it again once the
+// stream is live -- but the picker is at least there to choose from first.
+listCameras();
 
 // Export helpers
 function csvEscape(s) {
