@@ -78,6 +78,19 @@
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--blue);
     box-shadow: 0 0 0 3px rgba(14,29,162,.15); }
   textarea { min-height: 92px; resize: vertical; }
+
+  /* Checkboxes are not text boxes: the width:100% above would stretch one across
+     the whole row and squeeze its label into a wrapping column. */
+  input[type=checkbox] { width: auto; padding: 0; }
+  .checkline { display: flex; align-items: center; gap: 10px;
+    margin: 12px 0 0; padding: 11px 12px; border: 1px solid var(--line);
+    border-radius: 9px; font-size: 14px; font-weight: 500; cursor: pointer;
+    transition: border-color .12s, background .12s; }
+  .checkline:hover { border-color: var(--blue); background: rgba(14,29,162,.04); }
+  .checkline input[type=checkbox] { flex: none; width: 17px; height: 17px;
+    margin: 0; accent-color: var(--blue); cursor: pointer; }
+  .checkline:has(input:checked) { border-color: var(--blue); background: rgba(14,29,162,.06); }
+  .hint { font-size: 13px; color: var(--muted); margin: 8px 2px 0; line-height: 1.45; }
   input#fld_sn { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; letter-spacing: .3px; }
   .row { display: flex; gap: 10px; }
   .row > div { flex: 1; }
@@ -122,31 +135,36 @@
     <div class="formcol">
       <form id="ticket" class="card" autocomplete="on">
         <h2>Ticket details</h2>
-        <label for="fld_sn" id="lbl_sn">Chromebook S/N <span class="req">*</span></label>
-        <input type="text" id="fld_sn" name="sn" required placeholder="Scan the QR code, or type it">
+        <div id="snwrap">
+          <label for="fld_sn" id="lbl_sn">Chromebook S/N <span class="req">*</span></label>
+          <input type="text" id="fld_sn" name="sn" required placeholder="Scan the QR code, or type it">
+        </div>
 
-        <!-- Not a Chromebook or iPad. The S/N box then takes a teacher and room
-             instead of a serial: nothing downstream has a device to attach to,
-             so the serial checks are skipped, no roster note is written, and no
-             to-do is created -- the To-Do page is the history of the Chromebooks
-             and iPads, and a projector does not belong in it. -->
-        <label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:8px 0 4px">
+        <!-- Not a Chromebook or iPad. The S/N box is hidden, and the teacher and
+             room are taken from "Your name" and "Room #" below -- both of which
+             are required either way -- then joined into the "Name · Rm N" value
+             the S/N column has always held for these tickets. Nothing downstream
+             has a device to attach to, so the serial checks are skipped, no
+             roster note is written, and no to-do is created -- the To-Do page is
+             the history of the Chromebooks and iPads, and a projector does not
+             belong in it. -->
+        <label class="checkline" for="fld_notdevice">
           <input type="checkbox" id="fld_notdevice" name="notdevice">
           <span>This isn't about a Chromebook or iPad</span>
         </label>
-        <div id="notdevice_hint" class="muted" style="display:none;font-size:12.5px;margin-bottom:6px">
-          Put the teacher and room in the box above, and describe what the equipment
-          is in “Describe the problem”.
+        <div id="notdevice_hint" class="hint" style="display:none">
+          Say what the equipment is in “Describe the problem”. Your name and room
+          number below tell us where to find it.
         </div>
 
         <div class="row">
           <div>
-            <label for="fld_name">Your name</label>
-            <input type="text" id="fld_name" name="name" placeholder="Teacher name">
+            <label for="fld_name">Your name <span class="req">*</span></label>
+            <input type="text" id="fld_name" name="name" required placeholder="Teacher name">
           </div>
           <div>
-            <label for="fld_room">Room #</label>
-            <input type="text" id="fld_room" name="room" placeholder="e.g. 13">
+            <label for="fld_room">Room # <span class="req">*</span></label>
+            <input type="text" id="fld_room" name="room" required placeholder="e.g. 13">
           </div>
         </div>
 
@@ -10390,6 +10408,7 @@ function serialFromScan(raw) {
 function onDetected(data) {
   data = serialFromScan(data);
   if (!data) return;
+  if (notDevice()) return;                // S/N box is hidden; nothing to fill
   snField.value = data;
   beep();
   if (navigator.vibrate) { try { navigator.vibrate(120); } catch (e) {} }
@@ -10509,10 +10528,11 @@ var CHECK_LABEL_MSG = 'Check the S/N printed on the device label — it is the l
                       'letters and numbers, usually on the sticker underneath the Chromebook.';
 
 // ---- "This isn't about a Chromebook or iPad" ----------------------------------
-// The S/N box takes a teacher and room instead of a serial, so every check that
-// assumes a serial is turned off: the shape test below, the duplicate-ticket
-// lookup and the inventory lookup. Issue type is forced to Other, because none
-// of the others describe anything but a Chromebook.
+// There is no serial to give, so the S/N box is hidden outright and the teacher
+// and room come from "Your name" and "Room #", which are required either way.
+// Every check that assumes a serial is turned off: the shape test below, the
+// duplicate-ticket lookup and the inventory lookup. Issue type is forced to
+// Other, because none of the others describe anything but a Chromebook.
 //
 // The server does not take this on trust -- isDeviceTicket_ also rejects
 // anything that is not shaped like a serial -- but the flag records that it was
@@ -10521,26 +10541,35 @@ var notDeviceBox = document.getElementById('fld_notdevice');
 
 function notDevice() { return notDeviceBox && notDeviceBox.checked; }
 
+// What goes in the S/N column when there is no device: the same "Name · Rm N"
+// shape it has always held, now built from the two fields instead of typed.
+function teacherAndRoom() {
+  var name = document.getElementById('fld_name').value.trim();
+  var room = document.getElementById('fld_room').value.trim();
+  if (name && room) return name + ' · Rm ' + room;
+  return name || (room ? 'Rm ' + room : '');
+}
+
 if (notDeviceBox) {
   notDeviceBox.addEventListener('change', function () {
     var on = this.checked;
     var sn = document.getElementById('fld_sn');
-    var lbl = document.getElementById('lbl_sn');
     var issue = document.getElementById('fld_issue');
 
+    // A hidden field that is still required makes reportValidity() fail on a
+    // control it cannot scroll to, and the form silently refuses to submit.
+    sn.required = !on;
+    document.getElementById('snwrap').style.display = on ? 'none' : '';
+    sn.value = '';
+
     if (on) {
-      lbl.innerHTML = 'Teacher and room <span class="req">*</span>';
-      sn.placeholder = 'e.g. Messer · Rm 13';
       issue.value = 'Other';
       issue.disabled = true;                 // .value still reads back when disabled
     } else {
-      lbl.innerHTML = 'Chromebook S/N <span class="req">*</span>';
-      sn.placeholder = 'Scan the QR code, or type it';
       issue.disabled = false;
     }
-    sn.value = '';
     document.getElementById('notdevice_hint').style.display = on ? 'block' : 'none';
-    sn.focus();
+    document.getElementById(on ? 'fld_name' : 'fld_sn').focus();
   });
 }
 
@@ -10564,7 +10593,7 @@ form.addEventListener('submit', function (e) {
     return;
   }
   var payload = {
-    sn: document.getElementById('fld_sn').value.trim(),
+    sn: notDevice() ? teacherAndRoom() : document.getElementById('fld_sn').value.trim(),
     name: document.getElementById('fld_name').value.trim(),
     room: document.getElementById('fld_room').value.trim(),
     email: document.getElementById('fld_email').value.trim(),
