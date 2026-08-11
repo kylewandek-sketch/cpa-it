@@ -10966,7 +10966,16 @@ function edRenderGrid() {
   var note = rows.length + ' of ' + d.total + ' row' + (d.total === 1 ? '' : 's');
   if (d.truncated) note += ' · showing the first ' + d.rows.length + ' — use the filter or Batch mode for the rest';
 
-  var h = '<div class="chart-card">' + head +
+  // A mirrored tab has nothing editable on it at all, so say so once at the top
+  // rather than letting every cell look clickable.
+  var banner = '';
+  if (d.readOnly) {
+    banner = '<div class="rnote" style="color:var(--amber);font-weight:600">🔒 Read-only — ' +
+      esc(d.readOnlyWhy || 'this tab mirrors another sheet.') + '</div>';
+    head = '';
+  }
+
+  var h = '<div class="chart-card">' + head + banner +
     '<div class="rnote">' + esc(note) + '</div>' +
     '<div class="tablewrap"><table><thead><tr><th>Row</th>' +
     d.headers.map(function (hd, i) {
@@ -10979,6 +10988,10 @@ function edRenderGrid() {
     h += '<tr><td class="muted">' + row.row + '</td>';
     row.cells.forEach(function (v, i) {
       var col = i + 1;
+      if (d.readOnly) {
+        h += '<td class="ed-lock">' + esc(v) + '</td>';
+        return;
+      }
       if (d.serialCol && col === d.serialCol) {
         h += '<td class="ed-lock" title="Serial columns are locked. Fix a serial in Sheets.">' +
           esc(v) + ' 🔒</td>';
