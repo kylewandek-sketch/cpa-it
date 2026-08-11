@@ -282,9 +282,9 @@
   <div id="app" class="hidden">
     <div class="tabs">
       <button id="tabTickets" class="tab active">Tickets</button>
-      <button id="tabReports" class="tab">Reports</button>
-      <button id="tabLookup" class="tab">Lookup</button>
       <button id="tabTodo" class="tab">To-Do</button>
+      <button id="tabLookup" class="tab">Lookup</button>
+      <button id="tabReports" class="tab">Reports</button>
       <button id="tabEditor" class="tab">Editor</button>
     </div>
     <div class="stats" id="stats"></div>
@@ -10832,8 +10832,11 @@ function updateField(row, fields) {
 
 // ---- Reports (charts from the currently loaded tickets) ----
 var activeTab = 'tickets';
-var TABS = { tickets: 'tabTickets', reports: 'tabReports', lookup: 'tabLookup',
-             todo: 'tabTodo', editor: 'tabEditor' };
+// Keys follow the tab strip's left-to-right order. Nothing depends on it --
+// views are found by name + 'View' and setTab branches on the name -- but a map
+// that reads in a different order than the screen is a small trap.
+var TABS = { tickets: 'tabTickets', todo: 'tabTodo', lookup: 'tabLookup',
+             reports: 'tabReports', editor: 'tabEditor' };
 Object.keys(TABS).forEach(function (name) {
   document.getElementById(TABS[name]).onclick = function () { setTab(name); };
 });

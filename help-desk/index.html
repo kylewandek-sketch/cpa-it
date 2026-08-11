@@ -122,8 +122,22 @@
     <div class="formcol">
       <form id="ticket" class="card" autocomplete="on">
         <h2>Ticket details</h2>
-        <label for="fld_sn">Chromebook S/N <span class="req">*</span></label>
+        <label for="fld_sn" id="lbl_sn">Chromebook S/N <span class="req">*</span></label>
         <input type="text" id="fld_sn" name="sn" required placeholder="Scan the QR code, or type it">
+
+        <!-- Not a Chromebook or iPad. The S/N box then takes a teacher and room
+             instead of a serial: nothing downstream has a device to attach to,
+             so the serial checks are skipped, no roster note is written, and no
+             to-do is created -- the To-Do page is the history of the Chromebooks
+             and iPads, and a projector does not belong in it. -->
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400;margin:8px 0 4px">
+          <input type="checkbox" id="fld_notdevice" name="notdevice">
+          <span>This isn't about a Chromebook or iPad</span>
+        </label>
+        <div id="notdevice_hint" class="muted" style="display:none;font-size:12.5px;margin-bottom:6px">
+          Put the teacher and room in the box above, and describe what the equipment
+          is in “Describe the problem”.
+        </div>
 
         <div class="row">
           <div>
@@ -10494,12 +10508,48 @@ function looksLikeSerial(sn) {
 var CHECK_LABEL_MSG = 'Check the S/N printed on the device label — it is the longer code of ' +
                       'letters and numbers, usually on the sticker underneath the Chromebook.';
 
+// ---- "This isn't about a Chromebook or iPad" ----------------------------------
+// The S/N box takes a teacher and room instead of a serial, so every check that
+// assumes a serial is turned off: the shape test below, the duplicate-ticket
+// lookup and the inventory lookup. Issue type is forced to Other, because none
+// of the others describe anything but a Chromebook.
+//
+// The server does not take this on trust -- isDeviceTicket_ also rejects
+// anything that is not shaped like a serial -- but the flag records that it was
+// deliberate rather than inferred.
+var notDeviceBox = document.getElementById('fld_notdevice');
+
+function notDevice() { return notDeviceBox && notDeviceBox.checked; }
+
+if (notDeviceBox) {
+  notDeviceBox.addEventListener('change', function () {
+    var on = this.checked;
+    var sn = document.getElementById('fld_sn');
+    var lbl = document.getElementById('lbl_sn');
+    var issue = document.getElementById('fld_issue');
+
+    if (on) {
+      lbl.innerHTML = 'Teacher and room <span class="req">*</span>';
+      sn.placeholder = 'e.g. Messer · Rm 13';
+      issue.value = 'Other';
+      issue.disabled = true;                 // .value still reads back when disabled
+    } else {
+      lbl.innerHTML = 'Chromebook S/N <span class="req">*</span>';
+      sn.placeholder = 'Scan the QR code, or type it';
+      issue.disabled = false;
+    }
+    sn.value = '';
+    document.getElementById('notdevice_hint').style.display = on ? 'block' : 'none';
+    sn.focus();
+  });
+}
+
 form.addEventListener('submit', function (e) {
   e.preventDefault();
   if (!form.reportValidity()) return;
 
   var typedSn = document.getElementById('fld_sn').value.trim();
-  if (!looksLikeSerial(typedSn)) {
+  if (!notDevice() && !looksLikeSerial(typedSn)) {
     if (!confirm('"' + typedSn + '" does not look like a Chromebook serial number.\n\n' +
                  CHECK_LABEL_MSG + '\n\nSubmit anyway?')) {
       formmsg.textContent = 'Please check the S/N on the device label, then submit again.';
@@ -10522,6 +10572,7 @@ form.addEventListener('submit', function (e) {
     urgency: document.getElementById('fld_urgency').value,
     studentAtFault: document.getElementById('fld_student').value.trim(),
     description: document.getElementById('fld_desc').value.trim(),
+    nonDevice: notDevice() ? '1' : '',
     page: location.href
   };
   submitbtn.disabled = true;
@@ -10529,9 +10580,13 @@ form.addEventListener('submit', function (e) {
   // 1) compress any photo, 2) warn on an existing open ticket, 3) submit
   readPhoto(document.getElementById('fld_photo').files[0]).then(function (dataUrl) {
     payload.photo = dataUrl || '';
+    // Both remaining checks look a serial up in the inventory. There is no
+    // serial here, so they are skipped rather than asked and ignored.
+    if (notDevice()) return 'skip';
     formmsg.textContent = 'Checking for existing ticket…';
     return jsonp({ action: 'openCount', sn: payload.sn });
   }).then(function (res) {
+    if (res === 'skip') return 'go';
     if (res && res.ok && res.count > 0) {
       if (!confirm('There is already an open ticket for this Chromebook (S/N ' + payload.sn +
                    '). Submit another anyway?')) return 'cancel';
