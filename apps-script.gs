@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-08-10 lookup-from-assignment-roster';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-08-11 validation + loaners + editor';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -64,9 +64,11 @@ var TODO_GROUP_FALLBACK = 'Unassigned';
 // ignoring case and surrounding spaces. This is for tabs that are structurally
 // not carts -- for a one-off choice, use the remove control on the dashboard,
 // which writes to hiddenTodoGroups instead.
+// 'Spares' is here so the loaner pool's condition notes do not pour into the
+// cart to-do list. Remove it from this list if you decide you want them there.
 var TODO_SKIP_TABS = [
   'Crider', 'Palsa', 'Buechner', 'Aeh', 'Jablonski', 'Miller', 'Perez',
-  'Caudill', 'Moorman', 'Title 1', 'iPad Cart - Hunter'
+  'Caudill', 'Moorman', 'Title 1', 'iPad Cart - Hunter', 'Spares'
 ];
 
 function isSkippedTab_(name) {
@@ -82,9 +84,30 @@ function isSkippedTab_(name) {
 // Tabs in the roster workbook that are not carts at all. The ticket data and the
 // to-do list live in a different workbook now, but the check is cheap and stops
 // anything odd being read as a roster tab.
+// The Loaner_log tabs in the assignment and check workbooks. Since 2026-08-11
+// they are not data at all: A1 holds
+//   =IMPORTRANGE("...12CcT0FH...", "Loaners!A:H")
+// so each one is a read-only mirror of the Loaners ledger in the ticket book.
+//
+// This tab MUST be excluded, and the reason is not cosmetic. The mirror spills
+// the ledger's headers onto row 1, where rosterHeadInfo_ is looking:
+//
+//   "Inop S/N"   matches /serial|s\/n/  -> the tab reads as a roster tab
+//   "Note"       matches NOTE_HEADER_RE -> its column reads as a note source
+//
+// Left unguarded that means every serial in the ledger counted a second time in
+// both books and reported as filed in two places, plus one to-do item per
+// ledger row, in a group named after this tab. The old layout escaped only
+// because its header row sat below row 3; the mirror does not.
+//
+// Matched loosely on purpose -- "Loaner_log", "Loaner_logs", "Loaner Log" all
+// count. An exact name is one typo away from letting all of that back in.
+var RELOCATION_LOG_RE = /loaner[\s_-]*log/i;
+
 function isNonRosterTab_(name) {
   var n = String(name || '');
   if (n === TODO_SHEET_NAME) return true;
+  if (RELOCATION_LOG_RE.test(n)) return true;
   return n.toLowerCase().indexOf('ticket') >= 0;
 }
 
@@ -106,7 +129,10 @@ function doGet(e) {
   var out;
   var guarded = ['list', 'update', 'archiveTest', 'stats', 'lookup', 'notesToClear',
                  'todoList', 'todoAdd', 'todoUpdate', 'todoDelete', 'todoReorder',
-                 'todoHideGroup', 'todoShowGroup', 'refreshTodos', 'validateTodos'];
+                 'todoHideGroup', 'todoShowGroup', 'refreshTodos', 'validateTodos',
+                 'validateData', 'validateLast', 'validateIgnore', 'validateFixSerials',
+                 'loanerList', 'loanerOptions', 'loanerIssue', 'loanerReturn', 'loanerResync',
+                 'gridTabs', 'gridRead', 'gridSearch', 'gridWrite', 'gridUndo', 'gridBatches'];
   if (guarded.indexOf(p.action) >= 0 && p.token !== ADMIN_TOKEN) {
     out = { ok: false, error: 'unauthorized' };
   } else if (p.action === 'list') {
@@ -125,6 +151,36 @@ function doGet(e) {
     out = refreshTodos_();
   } else if (p.action === 'validateTodos') {
     out = validateTodos_(p);
+  } else if (p.action === 'validateData') {
+    out = validateData_(p);       // full cross-book walk, ~60-90s, button only
+  } else if (p.action === 'validateLast') {
+    out = validateLast_();        // the cached report, costs nothing
+  } else if (p.action === 'validateIgnore') {
+    out = validateIgnore_(p);
+  } else if (p.action === 'validateFixSerials') {
+    out = validateFixSerials_();
+  } else if (p.action === 'loanerList') {
+    out = loanerList_();
+  } else if (p.action === 'loanerOptions') {
+    out = loanerOptions_();
+  } else if (p.action === 'loanerIssue') {
+    out = loanerIssue_(p);
+  } else if (p.action === 'loanerReturn') {
+    out = loanerReturn_(p);
+  } else if (p.action === 'loanerResync') {
+    out = loanerResync_();
+  } else if (p.action === 'gridTabs') {
+    out = gridTabs_(p);
+  } else if (p.action === 'gridRead') {
+    out = gridRead_(p);
+  } else if (p.action === 'gridSearch') {
+    out = gridSearch_(p);
+  } else if (p.action === 'gridWrite') {
+    out = gridWrite_(p);
+  } else if (p.action === 'gridUndo') {
+    out = gridUndo_(p);
+  } else if (p.action === 'gridBatches') {
+    out = gridBatches_();
   } else if (p.action === 'todoList') {
     out = todoList_();
   } else if (p.action === 'todoAdd') {
@@ -2198,6 +2254,1327 @@ function archiveCopy_(clear) {
   dest.setFrozenRows(1);
   if (clear) src.getRange(2, 1, lastRow - 1, lastCol).clearContent();
   return { ok: true, name: name, rows: lastRow - 1, cleared: !!clear };
+}
+
+// ---- Sheet editor -----------------------------------------------------------
+// The Editor tab on the dashboard: browse one tab of one book and edit cells, or
+// search across books and apply one change to rows from several tabs at once.
+//
+// Three rules hold this together, and all three are enforced HERE rather than in
+// the browser, because the browser is only one of the ways this endpoint can be
+// called:
+//
+//   1. Only these three workbooks. A book is named by a key, never by an id sent
+//      from outside, so no request can point this at another spreadsheet.
+//   2. Serial columns are never writable. Not a UI convention -- gridWrite_
+//      refuses them. A wrong serial is a Sheets job, deliberately.
+//   3. Every write carries the value the browser last saw. If the cell no longer
+//      holds it, the write is refused rather than clobbering whoever changed it
+//      in Sheets in the meantime.
+var GRID_BOOKS = {
+  assignment: { id: ASSIGNMENT_SHEET_ID, label: '2026-2027 Chromebook Carts / iPads' },
+  check:      { id: NOTE_BOOK_ID,        label: 'Start-of-Year Check' },
+  tickets:    { id: TICKET_BOOK_ID,      label: 'Tickets' }
+};
+var GRID_ROW_CAP = 400;         // rows returned per tab
+var GRID_HIT_CAP = 200;         // search hits returned
+
+var EDIT_LOG_NAME = 'EditLog';
+var EDIT_LOG_HEADERS = ['When', 'Book', 'Tab', 'Row', 'Col', 'Header', 'Was', 'Now', 'Batch'];
+
+function gridBook_(key) {
+  var b = GRID_BOOKS[String(key || '')];
+  if (!b) return null;
+  return b;
+}
+
+function gridSheet_(key, tab) {
+  var b = gridBook_(key);
+  if (!b) return null;
+  var sh = SpreadsheetApp.openById(b.id).getSheetByName(String(tab || ''));
+  if (!sh) return null;
+  return sh;
+}
+
+// Where the headers are and which column holds the serial. The ticket book is
+// a plain table with headers on row 1; the two roster books go through
+// rosterHeadInfo_, which already copes with headers on rows 1-3 and with the
+// headerless tabs.
+function gridHeadInfo_(key, sh) {
+  if (key === 'tickets') {
+    var lastCol = Math.max(sh.getLastColumn(), 1);
+    return { row: 1, heads: sh.getRange(1, 1, 1, lastCol).getValues()[0], serialCol: 1 };
+  }
+  return rosterHeadInfo_(sh);
+}
+
+function gridTabs_(p) {
+  var b = gridBook_(p.book);
+  if (!b) return { ok: false, error: 'Unknown workbook.' };
+  var tabs = [];
+  SpreadsheetApp.openById(b.id).getSheets().forEach(function (sh) {
+    tabs.push(sh.getName());
+  });
+  return { ok: true, book: p.book, label: b.label, tabs: tabs };
+}
+
+function gridRead_(p) {
+  var sh = gridSheet_(p.book, p.tab);
+  if (!sh) return { ok: false, error: 'That tab was not found.' };
+  var info = gridHeadInfo_(p.book, sh);
+  var lastRow = sh.getLastRow();
+  var lastCol = Math.max(sh.getLastColumn(), 1);
+  var dataRow = info.row + 1;
+
+  var out = {
+    ok: true, book: p.book, tab: sh.getName(),
+    headerRow: info.row, headers: [], serialCol: info.serialCol,
+    title: '', room: '', rows: [], total: 0, truncated: false,
+    // Tells the grid to render every cell locked. gridWrite_ refuses this tab
+    // regardless; this just stops you typing into it first.
+    readOnly: RELOCATION_LOG_RE.test(sh.getName()),
+    readOnlyWhy: 'This tab mirrors the Loaners ledger in the ticket book. ' +
+                 'Edit the Loaners tab and this updates itself.'
+  };
+
+  // Cart tabs in the assignment book carry the teacher in A1 and the room in B1,
+  // both with a baked-in label. The page shows them stripped and writes them
+  // back with the label re-applied -- see gridApplyLabel_.
+  if (info.row > 1) {
+    out.title = stripRosterLabel_(sh.getRange(1, 1).getValue());
+    if (lastCol > 1) out.room = stripRosterLabel_(sh.getRange(1, 2).getValue());
+  }
+
+  for (var c = 0; c < lastCol; c++) {
+    var head = '';
+    if (info.heads && info.heads[c] != null) head = String(info.heads[c]);
+    out.headers.push(head);
+  }
+
+  if (lastRow >= dataRow) {
+    out.total = lastRow - dataRow + 1;
+    var take = out.total;
+    if (take > GRID_ROW_CAP) { take = GRID_ROW_CAP; out.truncated = true; }
+    var vals = sh.getRange(dataRow, 1, take, lastCol).getValues();
+    for (var r = 0; r < vals.length; r++) {
+      var cells = [];
+      for (var c2 = 0; c2 < lastCol; c2++) {
+        var v = vals[r][c2];
+        if (Object.prototype.toString.call(v) === '[object Date]') {
+          cells.push(Utilities.formatDate(v, Session.getScriptTimeZone(), 'M/d/yyyy'));
+        } else if (v === true || v === false) {
+          cells.push(String(v));
+        } else {
+          cells.push(String(v == null ? '' : v));
+        }
+      }
+      out.rows.push({ row: dataRow + r, cells: cells });
+    }
+  }
+  return out;
+}
+
+// Cross-book search. createTextFinder is the same trick deviceLookup_ uses: it
+// searches a whole workbook without this script reading 49 tabs itself, which is
+// the only reason a search across all three books is affordable at all.
+function gridSearch_(p) {
+  var q = String(p.q || '').trim();
+  if (q.length < 2) return { ok: false, error: 'Type at least two characters.' };
+  var keys = String(p.books || 'assignment,check').split(',');
+  var out = { ok: true, hits: [], truncated: false };
+
+  // Header info per tab, worked out once. The ticket book reads row 1 from the
+  // sheet every time it is asked, and two hundred hits on one tab would other-
+  // wise be two hundred reads of the same row.
+  var headMemo = {};
+  function headFor(key, sh) {
+    var memoKey = key + '|' + sh.getSheetId();
+    if (!headMemo[memoKey]) headMemo[memoKey] = gridHeadInfo_(key, sh);
+    return headMemo[memoKey];
+  }
+
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i].trim();
+    var b = gridBook_(key);
+    if (!b) continue;
+    var ss;
+    try { ss = SpreadsheetApp.openById(b.id); }
+    catch (e) { continue; }
+
+    var found = ss.createTextFinder(q).findAll();
+    for (var f = 0; f < found.length; f++) {
+      if (out.hits.length >= GRID_HIT_CAP) { out.truncated = true; break; }
+      var rng = found[f];
+      var sh = rng.getSheet();
+      var row = rng.getRow();
+      var info = headFor(key, sh);
+      if (row <= info.row) continue;                 // a header, not data
+      var head = '';
+      if (info.heads && info.heads[rng.getColumn() - 1] != null) {
+        head = String(info.heads[rng.getColumn() - 1]);
+      }
+      var sn = '';
+      if (info.serialCol) sn = String(sh.getRange(row, info.serialCol).getValue() || '');
+      out.hits.push({
+        book: key, bookLabel: b.label, tab: sh.getName(), row: row,
+        col: rng.getColumn(), header: head, sn: sn,
+        value: String(rng.getValue() == null ? '' : rng.getValue())
+      });
+    }
+    if (out.truncated) break;
+  }
+  return out;
+}
+
+// A1 on a cart tab holds "TEACHER: Miller (D)" and B1 holds "ROOM# 210". The
+// editor shows those stripped, so writing back what the page sends would drop
+// the label and quietly break everything that reads teacher and room. Whatever
+// prefix the cell already carries goes back on.
+function gridApplyLabel_(current, next) {
+  var s = String(current == null ? '' : current);
+  var m = s.match(/^(teacher\s*#?\s*:?\s*|room\s*#?\s*:?\s*)/i);
+  if (!m) return next;
+  return m[1] + next;
+}
+
+function editLogSheet_() {
+  var ss = ticketBook_();
+  var sh = ss.getSheetByName(EDIT_LOG_NAME);
+  if (sh) return sh;
+  sh = ss.insertSheet(EDIT_LOG_NAME);
+  sh.getRange(1, 1, 1, EDIT_LOG_HEADERS.length).setValues([EDIT_LOG_HEADERS]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+// Every edit, one at a time, each guarded by the value the browser last saw.
+//
+// The browser sends these in chunks because this endpoint is reached over JSONP,
+// which is a GET -- a hundred edits do not fit in a URL. Every chunk of one save
+// carries the same batch id, so gridUndo_ can put the whole save back however
+// many requests it arrived in.
+function gridWrite_(p) {
+  var edits;
+  try { edits = JSON.parse(p.edits || '[]'); }
+  catch (e) { return { ok: false, error: 'Could not read the edits.' }; }
+  if (!edits.length) return { ok: true, applied: 0, results: [] };
+
+  var batch = String(p.batch || '').trim();
+  if (!batch) batch = 'b' + new Date().getTime();
+  var log = editLogSheet_();
+  var logRows = [];
+  var results = [];
+  var applied = 0;
+  var now = new Date();
+
+  for (var i = 0; i < edits.length; i++) {
+    var e = edits[i];
+    var res = { i: i, ok: false, why: '' };
+    var sh = gridSheet_(e.b, e.t);
+    if (!sh) { res.why = 'tab not found'; results.push(res); continue; }
+
+    // The Loaner_log tabs are an IMPORTRANGE mirror of the Loaners ledger.
+    // Writing anywhere inside a spilled array turns it into #REF! and takes the
+    // mirror with it, so the whole tab is refused rather than any one cell.
+    if (RELOCATION_LOG_RE.test(sh.getName())) {
+      res.why = 'that tab mirrors the Loaners ledger — edit the ledger instead';
+      results.push(res);
+      continue;
+    }
+
+    var info = gridHeadInfo_(e.b, sh);
+    var col = Number(e.c), row = Number(e.r);
+    if (!col || !row) { res.why = 'bad cell'; results.push(res); continue; }
+
+    // Rule 2. The serial identifies the device to every other part of this
+    // script; nothing here is allowed to change it.
+    if (info.serialCol && col === info.serialCol && row > info.row) {
+      res.why = 'serial columns are locked';
+      results.push(res);
+      continue;
+    }
+
+    var cell = sh.getRange(row, col);
+    var cur = cell.getValue();
+    var curText = String(cur == null ? '' : cur);
+    if (Object.prototype.toString.call(cur) === '[object Date]') {
+      curText = Utilities.formatDate(cur, Session.getScriptTimeZone(), 'M/d/yyyy');
+    }
+    // Rule 3. Somebody edited this in Sheets while the grid was open.
+    //
+    // The teacher and room cells are shown to the page with their label peeled
+    // off ("Miller (D)", not "TEACHER: Miller (D)"), so the value the page sends
+    // back as "what I last saw" is the stripped one. Both spellings count as a
+    // match; anything else really has changed underneath.
+    var want = String(e.w == null ? '' : e.w).trim();
+    var stripped = stripRosterLabel_(curText);
+    if (curText.trim() !== want && stripped !== want) {
+      res.why = 'changed in the sheet since you loaded it (now "' + curText + '")';
+      results.push(res);
+      continue;
+    }
+
+    var next = String(e.n == null ? '' : e.n);
+    var written = gridApplyLabel_(cur, next);
+    if (written === '') cell.clearContent();
+    else cell.setValue(written);
+
+    var head = '';
+    if (info.heads && info.heads[col - 1] != null) head = String(info.heads[col - 1]);
+    logRows.push([now, e.b, sh.getName(), row, col, head, curText, written, batch]);
+    res.ok = true;
+    applied++;
+    results.push(res);
+  }
+
+  if (logRows.length) {
+    log.getRange(log.getLastRow() + 1, 1, logRows.length, EDIT_LOG_HEADERS.length).setValues(logRows);
+  }
+  return { ok: true, applied: applied, batch: batch, results: results };
+}
+
+// Put a whole save back. Guarded the other way round: a cell is only reverted
+// while it still holds what this batch wrote, so an edit made after the batch is
+// never silently undone.
+function gridUndo_(p) {
+  var batch = String(p.batch || '').trim();
+  if (!batch) return { ok: false, error: 'No batch given.' };
+  var log = editLogSheet_();
+  var last = log.getLastRow();
+  if (last < 2) return { ok: false, error: 'Nothing logged yet.' };
+
+  var vals = log.getRange(2, 1, last - 1, EDIT_LOG_HEADERS.length).getValues();
+  var reverted = 0, skipped = 0;
+  for (var i = vals.length - 1; i >= 0; i--) {         // newest first
+    if (String(vals[i][8]) !== batch) continue;
+    var sh = gridSheet_(vals[i][1], vals[i][2]);
+    if (!sh) { skipped++; continue; }
+    var cell = sh.getRange(Number(vals[i][3]), Number(vals[i][4]));
+    var cur = String(cell.getValue() == null ? '' : cell.getValue());
+    if (cur.trim() !== String(vals[i][7] == null ? '' : vals[i][7]).trim()) { skipped++; continue; }
+    var back = String(vals[i][6] == null ? '' : vals[i][6]);
+    if (back === '') cell.clearContent();
+    else cell.setValue(back);
+    reverted++;
+  }
+  return { ok: true, reverted: reverted, skipped: skipped };
+}
+
+// The most recent saves, so the Editor tab can offer to undo one.
+function gridBatches_() {
+  var log = editLogSheet_();
+  var last = log.getLastRow();
+  var out = { ok: true, batches: [] };
+  if (last < 2) return out;
+  var take = 400;
+  var from = Math.max(2, last - take + 1);
+  var vals = log.getRange(from, 1, last - from + 1, EDIT_LOG_HEADERS.length).getValues();
+  var seen = {};
+  for (var i = vals.length - 1; i >= 0; i--) {
+    var id = String(vals[i][8]);
+    if (!id) continue;
+    if (!seen[id]) {
+      seen[id] = { batch: id, when: new Date(vals[i][0]).toISOString(), count: 0, books: {} };
+      out.batches.push(seen[id]);
+    }
+    seen[id].count++;
+    seen[id].books[String(vals[i][1])] = true;
+  }
+  out.batches = out.batches.slice(0, 10);
+  out.batches.forEach(function (b) { b.bookList = Object.keys(b.books).join(', '); delete b.books; });
+  return out;
+}
+
+// ---- Spares / loaner pool ---------------------------------------------------
+// The spares tab is laid out exactly like a cart tab -- a title on row 1,
+// headers on row 2, devices from row 3 -- so every reader in this file finds it
+// without a single change: rosterHeadInfo_ sees "Serial #" on row 2, and
+// rosterFindRows_ (which requires a serial header on row 2 and data below row
+// 2) matches it. rosterTabScore_ already gives a tab named "spares" a bonus, so
+// a device sitting on both a cart and the spares tab notes on the spares tab.
+//
+// Run once from the editor. Safe to run again; it never touches an existing tab.
+var SPARES_HEADERS = ['#', 'Serial #', 'Model', 'Condition', 'Loaner'];
+
+function setupSparesTab() {
+  var ss = SpreadsheetApp.openById(NOTE_BOOK_ID);
+  var sh = ss.getSheetByName(SPARES_TAB_NAME);
+  if (sh) {
+    Logger.log('the "' + SPARES_TAB_NAME + '" tab already exists — nothing changed');
+    return sh.getName();
+  }
+  sh = ss.insertSheet(SPARES_TAB_NAME);
+  sh.getRange(1, 1).setValue('SPARES / LOANER POOL').setFontWeight('bold');
+  sh.getRange(2, 1, 1, SPARES_HEADERS.length).setValues([SPARES_HEADERS]).setFontWeight('bold');
+  sh.setFrozenRows(2);
+  sh.setColumnWidth(2, 150);
+  sh.setColumnWidth(5, 260);
+  rosterHeadReset_();
+  cartTabsRefresh_();
+  Logger.log('created "' + SPARES_TAB_NAME + '" — put a serial in column B from row 3 down');
+  return sh.getName();
+}
+
+// ---- Loaner ledger ----------------------------------------------------------
+// The Loaners tab IS the record. The notes this writes onto the two devices are
+// a mirror of it, the same way the Todos tab mirrors the roster: nothing ever
+// reads a note to decide whether a device is out, and loanerResync_() can
+// rebuild every note from the ledger if one gets mangled in Sheets.
+//
+// There is no id column and no status column, on purpose. A loan is identified
+// by inop serial + loaner serial + an empty "Date in", and only one loan for a
+// pair can be open at a time, so a return never has to guess which row it
+// means. Status is just "is Date in empty".
+var LOANER_HEADERS = ['Date out', 'Inop S/N', 'Inop cart', 'Loaner S/N',
+                      'Loaner source', 'Student', 'Note', 'Date in'];
+
+// The header on the roster column that carries loaner notes.
+//
+// Deliberately NOT rosterNoteColumn_(): that returns the first BLANK-header
+// column, which is where ticket notes land, so a device with both a ticket and
+// a loan would have one silently overwrite the other.
+//
+// Giving the column a header also keeps loaner notes out of the to-do list for
+// free. rosterNoteColumns_() only treats a column as a note source when its
+// header is blank or matches NOTE_HEADER_RE (note|issue|repair|comment|problem|
+// damage|broken|status), and "Loaner" is neither. Rename this and that stops
+// being true -- "Loaner status" would start generating to-dos.
+var LOANER_NOTE_HEADER = 'Loaner';
+
+function loanerSheet_() {
+  var ss = ticketBook_();
+  var sh = ss.getSheetByName(LOANER_SHEET_NAME);
+  if (sh) return sh;
+  sh = ss.insertSheet(LOANER_SHEET_NAME);
+  sh.getRange(1, 1, 1, LOANER_HEADERS.length).setValues([LOANER_HEADERS]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  sh.setColumnWidth(2, 130);
+  sh.setColumnWidth(4, 130);
+  sh.setColumnWidth(7, 240);
+  return sh;
+}
+
+// create=false when clearing: never add a column to a tab just to blank a cell
+// in it.
+function loanerNoteColumn_(sh, create) {
+  var info = rosterHeadInfo_(sh);
+  if (!info.row) return 0;                  // headerless tab (Speech): nowhere to put a header
+  var heads = info.heads;
+  for (var c = 0; c < heads.length; c++) {
+    if (String(heads[c] || '').trim().toLowerCase() === LOANER_NOTE_HEADER.toLowerCase()) {
+      return c + 1;
+    }
+  }
+  if (!create) return 0;
+  var col = sh.getLastColumn() + 1;
+  sh.getRange(info.row, col).setValue(LOANER_NOTE_HEADER).setFontWeight('bold');
+  rosterHeadReset_();                       // the cached header row is now stale
+  return col;
+}
+
+function loanerShortDate_(d) {
+  var dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return (dt.getMonth() + 1) + '/' + dt.getDate();
+}
+
+// The two notes a loan puts on the two devices. Both the writer and the
+// validator build them here, so a wording change can never make the validator
+// report drift that does not exist.
+function loanerInopNote_(loanerSn, dateOut, source) {
+  var text = 'INOP — loaner ' + loanerSn + ' out ' + loanerShortDate_(dateOut);
+  if (String(source || '').trim()) text += ' (' + String(source).trim() + ')';
+  return text;
+}
+
+function loanerOutNote_(student, inopSn, dateOut) {
+  var who = String(student || '').trim();
+  var text = 'LOANER — out';
+  if (who) text += ' to ' + who;
+  return text + ', replaces ' + inopSn + ', ' + loanerShortDate_(dateOut);
+}
+
+// Only ever writes into a cell that is empty or already holds a loaner note.
+//
+// Anything else in that column was typed by a person, and a re-sync across a
+// ledger full of open loans would otherwise overwrite it with no undo behind it.
+// Refusing instead means re-sync cannot destroy anything: the worst case is a
+// note that does not get written, which the validator then reports.
+var LOANER_NOTE_RE = /^(INOP|LOANER)\s*[—-]/i;
+
+function loanerNoteWrite_(sn, text) {
+  try {
+    var hits = rosterFindRows_(sn);
+    if (!hits.length) return { ok: true, skipped: 'not on any tab' };
+    var target = rosterPickBest_(hits);
+    var col = loanerNoteColumn_(target.sheet, true);
+    if (!col) return { ok: true, skipped: 'tab has no header row' };
+    var cell = target.sheet.getRange(target.row, col);
+    var cur = String(cell.getValue() || '').trim();
+    if (cur && !LOANER_NOTE_RE.test(cur)) {
+      return { ok: true, skipped: 'cell holds something typed by hand: "' + cur + '"' };
+    }
+    cell.setValue(text);
+    return { ok: true, tab: target.sheet.getName(), row: target.row };
+  } catch (e) {
+    Logger.log('loaner note write failed for ' + sn + ': ' + e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+// Clears on every tab the serial appears on, so nothing is left behind if the
+// device moved tabs while it was out -- and only when the cell still holds our
+// text, so a note somebody typed by hand is never wiped.
+function loanerNoteClear_(sn, text) {
+  try {
+    var hits = rosterFindRows_(sn);
+    var cleared = 0;
+    for (var i = 0; i < hits.length; i++) {
+      var col = loanerNoteColumn_(hits[i].sheet, false);
+      if (!col) continue;
+      var cell = hits[i].sheet.getRange(hits[i].row, col);
+      var cur = String(cell.getValue() || '').trim();
+      if (!cur) continue;
+      if (cur !== String(text).trim()) continue;
+      cell.clearContent();
+      cleared++;
+    }
+    return { ok: true, cleared: cleared };
+  } catch (e) {
+    Logger.log('loaner note clear failed for ' + sn + ': ' + e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+// Every row, newest first, with the two things the page would otherwise have to
+// work out for itself: whether it is open, and how long it has been out.
+function loanerList_() {
+  var sh = loanerSheet_();
+  var out = { ok: true, loans: [], openCount: 0 };
+  var last = sh.getLastRow();
+  if (last < 2) return out;
+  var vals = sh.getRange(2, 1, last - 1, LOANER_HEADERS.length).getValues();
+  var today = new Date();
+  for (var i = 0; i < vals.length; i++) {
+    var v = vals[i];
+    var inopSn = String(v[1] || '').trim();
+    var loanerSn = String(v[3] || '').trim();
+    if (!inopSn && !loanerSn) continue;
+
+    var dOut = null, dIn = null;
+    if (v[0]) dOut = new Date(v[0]);
+    if (v[7]) dIn = new Date(v[7]);
+    var open = !dIn;
+
+    var days = '';
+    if (dOut) {
+      var end = today;
+      if (dIn) end = dIn;
+      days = Math.round((end.getTime() - dOut.getTime()) / 86400000);
+      if (days < 0) days = 0;
+    }
+
+    var rec = {
+      row: i + 2,
+      dateOut: '', inopSn: inopSn, inopCart: String(v[2] || ''),
+      loanerSn: loanerSn, source: String(v[4] || ''),
+      student: String(v[5] || ''), note: String(v[6] || ''),
+      dateIn: '', open: open, days: days
+    };
+    if (dOut) rec.dateOut = dOut.toISOString();
+    if (dIn) rec.dateIn = dIn.toISOString();
+    out.loans.push(rec);
+    if (open) out.openCount++;
+  }
+  out.loans.sort(function (a, b) { return String(b.dateOut).localeCompare(String(a.dateOut)); });
+  return out;
+}
+
+// What the page puts behind the type-ahead fields: every value already used in
+// that column, most recently used first, so the vocabulary teaches itself and
+// never needs maintaining. Typing something new is always allowed.
+function loanerOptions_() {
+  var sh = loanerSheet_();
+  var out = { ok: true, carts: [], sources: [], students: [] };
+  var last = sh.getLastRow();
+  if (last < 2) return out;
+  var vals = sh.getRange(2, 1, last - 1, LOANER_HEADERS.length).getValues();
+  var seen = { carts: {}, sources: {}, students: {} };
+
+  function take(list, mark, value) {
+    var s = String(value || '').trim();
+    if (!s) return;
+    var key = s.toLowerCase();
+    if (mark[key]) return;
+    mark[key] = true;
+    list.push(s);
+  }
+
+  for (var i = vals.length - 1; i >= 0; i--) {      // newest row first
+    take(out.carts, seen.carts, vals[i][2]);
+    take(out.sources, seen.sources, vals[i][4]);
+    take(out.students, seen.students, vals[i][5]);
+  }
+  return out;
+}
+
+// The open loan for a serial, on either side of the pair.
+function loanerOpenFor_(loans, sn) {
+  var key = String(sn || '').trim().toUpperCase();
+  for (var i = 0; i < loans.length; i++) {
+    if (!loans[i].open) continue;
+    if (loans[i].inopSn.toUpperCase() === key) return loans[i];
+    if (loans[i].loanerSn.toUpperCase() === key) return loans[i];
+  }
+  return null;
+}
+
+function loanerIssue_(p) {
+  var inopSn = serialFromScan_(p.inopSn);
+  var loanerSn = serialFromScan_(p.loanerSn);
+  if (!inopSn) return { ok: false, error: 'The broken device needs a serial.' };
+  if (!loanerSn) return { ok: false, error: 'The loaner needs a serial.' };
+  if (inopSn.toUpperCase() === loanerSn.toUpperCase()) {
+    return { ok: false, error: 'The loaner and the broken device are the same serial.' };
+  }
+
+  var existing = loanerList_().loans;
+  var busy = loanerOpenFor_(existing, loanerSn);
+  if (busy) {
+    return { ok: false, error: 'That loaner is already out (row ' + busy.row + ', to ' +
+             (busy.student || 'nobody named') + ' since ' + loanerShortDate_(busy.dateOut) + ').' };
+  }
+  var already = loanerOpenFor_(existing, inopSn);
+  if (already && String(p.replace) !== '1') {
+    return { ok: false, needsReplace: true, open: already,
+             error: 'That device already has loaner ' + already.loanerSn + ' out (row ' +
+                    already.row + ').' };
+  }
+
+  // Replacing an open loan: close the old one first, so the pair key stays
+  // unique and the old loaner's note comes off.
+  if (already && String(p.replace) === '1') {
+    loanerReturn_({ row: already.row });
+  }
+
+  var now = new Date();
+  var sh = loanerSheet_();
+  var row = [now, inopSn, String(p.inopCart || '').trim(), loanerSn,
+             String(p.source || '').trim(), String(p.student || '').trim(),
+             String(p.note || '').trim(), ''];
+  sh.appendRow(row);
+  var rowNo = sh.getLastRow();
+
+  var inopNote = loanerInopNote_(loanerSn, now, p.source);
+  var outNote = loanerOutNote_(p.student, inopSn, now);
+  var w1 = loanerNoteWrite_(inopSn, inopNote);
+  var w2 = loanerNoteWrite_(loanerSn, outNote);
+
+  return { ok: true, row: rowNo, inopSn: inopSn, loanerSn: loanerSn,
+           inopNote: w1, loanerNote: w2 };
+}
+
+function loanerReturn_(p) {
+  var sh = loanerSheet_();
+  var loans = loanerList_().loans;
+  var target = null;
+
+  if (p.row) {
+    for (var i = 0; i < loans.length; i++) {
+      if (String(loans[i].row) === String(p.row)) { target = loans[i]; break; }
+    }
+  } else {
+    // No row given: the open loan for whichever serial was handed in.
+    var sn = serialFromScan_(p.sn || p.loanerSn || p.inopSn);
+    target = loanerOpenFor_(loans, sn);
+  }
+  if (!target) return { ok: false, error: 'No open loan found for that.' };
+  if (!target.open) return { ok: false, error: 'That loan was already returned.' };
+
+  var c1 = loanerNoteClear_(target.inopSn, loanerInopNote_(target.loanerSn, target.dateOut, target.source));
+  var c2 = loanerNoteClear_(target.loanerSn, loanerOutNote_(target.student, target.inopSn, target.dateOut));
+  sh.getRange(target.row, 8).setValue(new Date());
+
+  return { ok: true, row: target.row, cleared: (c1.cleared || 0) + (c2.cleared || 0) };
+}
+
+// Rebuild the device notes from the ledger. This is the answer to any note that
+// got mangled or deleted in Sheets -- the ledger is the record, so the notes can
+// always be made to match it again.
+//
+// Open rows are always checked. Closed rows are only checked when they closed in
+// the last 30 days: an old return whose note is already gone costs a text-finder
+// pass to prove nothing, and there is no upper bound on how many of those pile
+// up over a year.
+function loanerResync_() {
+  var loans = loanerList_().loans;
+  var written = 0, cleared = 0, checked = 0;
+  var skipped = [];
+  var cutoff = new Date().getTime() - (30 * 86400000);
+
+  for (var i = 0; i < loans.length; i++) {
+    var L = loans[i];
+    var inopNote = loanerInopNote_(L.loanerSn, L.dateOut, L.source);
+    var outNote = loanerOutNote_(L.student, L.inopSn, L.dateOut);
+
+    if (L.open) {
+      checked++;
+      var w1 = loanerNoteWrite_(L.inopSn, inopNote);
+      var w2 = loanerNoteWrite_(L.loanerSn, outNote);
+      if (w1.ok && !w1.skipped) written++;
+      if (w2.ok && !w2.skipped) written++;
+      if (w1.skipped) skipped.push(L.inopSn + ' — ' + w1.skipped);
+      if (w2.skipped) skipped.push(L.loanerSn + ' — ' + w2.skipped);
+      continue;
+    }
+    if (!L.dateIn) continue;
+    if (new Date(L.dateIn).getTime() < cutoff) continue;
+    checked++;
+    cleared += (loanerNoteClear_(L.inopSn, inopNote).cleared || 0);
+    cleared += (loanerNoteClear_(L.loanerSn, outNote).cleared || 0);
+  }
+  return { ok: true, checked: checked, written: written, cleared: cleared,
+           skipped: skipped.length, skippedList: cap_(skipped, 20) };
+}
+
+// Read-only. Finds where loaner records are actually being kept, when they are
+// not in the Loaners tab this script reads.
+//
+// Two passes, cheapest first: tab NAMES across all three books, which costs one
+// getSheets() per book; then, only if that finds nothing, the first two rows of
+// every tab looking for a header that mentions a loan. The second pass is ~110
+// reads, so it is deliberately the fallback rather than the default.
+function findLoanerLog() {
+  var books = [
+    { label: 'ticket book',     id: TICKET_BOOK_ID },
+    { label: 'check workbook',  id: NOTE_BOOK_ID },
+    { label: 'assignment book', id: ASSIGNMENT_SHEET_ID }
+  ];
+  var nameRe = /loan/i;
+  var headRe = /loaner|loan\s*out|out\s*to|replaces/i;
+  var hits = [];
+  var all = [];
+
+  for (var b = 0; b < books.length; b++) {
+    var ss;
+    try { ss = SpreadsheetApp.openById(books[b].id); }
+    catch (e) { Logger.log(books[b].label + ': CANNOT OPEN — ' + e); continue; }
+    var sheets = ss.getSheets();
+    for (var s = 0; s < sheets.length; s++) {
+      var nm = sheets[s].getName();
+      all.push({ book: books[b].label, sheet: sheets[s], name: nm });
+      if (nameRe.test(nm)) {
+        hits.push(books[b].label + ' · "' + nm + '"  (' +
+                  Math.max(sheets[s].getLastRow() - 1, 0) + ' data row(s))');
+      }
+    }
+  }
+
+  Logger.log('=== tabs whose NAME mentions a loan (' + hits.length + ') ===');
+  for (var h = 0; h < hits.length; h++) Logger.log('   ' + hits[h]);
+
+  if (hits.length) {
+    Logger.log('');
+    Logger.log('If one of those is your log, tell me the book and tab name.');
+    return hits;
+  }
+
+  Logger.log('');
+  Logger.log('None. Scanning the first two rows of all ' + all.length + ' tabs...');
+  var found = [];
+  for (var i = 0; i < all.length; i++) {
+    var sh = all[i].sheet;
+    var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+    if (!lastRow || !lastCol) continue;
+    var vals;
+    try { vals = sh.getRange(1, 1, Math.min(2, lastRow), lastCol).getValues(); }
+    catch (e2) { continue; }
+    for (var r = 0; r < vals.length; r++) {
+      for (var c = 0; c < vals[r].length; c++) {
+        if (typeof vals[r][c] !== 'string') continue;
+        if (!headRe.test(vals[r][c])) continue;
+        found.push(all[i].book + ' · "' + all[i].name + '"  row ' + (r + 1) +
+                   ' col ' + (c + 1) + ': "' + vals[r][c] + '"  (' +
+                   Math.max(lastRow - 1, 0) + ' data row(s))');
+        r = vals.length;                 // one hit per tab is enough
+        break;
+      }
+    }
+  }
+  Logger.log('=== tabs with a loaner-ish header (' + found.length + ') ===');
+  for (var f = 0; f < found.length; f++) Logger.log('   ' + found[f]);
+  if (!found.length) Logger.log('   nothing found — the log is in another spreadsheet entirely');
+  return found;
+}
+
+// Proves the ledger and the spares tab are reachable and writable before you
+// rely on them. Run from the editor.
+function checkLoanerSetup() {
+  var sh = loanerSheet_();
+  Logger.log('ledger tab: "' + sh.getName() + '" in the ticket book, ' +
+             Math.max(sh.getLastRow() - 1, 0) + ' row(s)');
+  var spares = SpreadsheetApp.openById(NOTE_BOOK_ID).getSheetByName(SPARES_TAB_NAME);
+  if (spares) {
+    Logger.log('spares tab: "' + spares.getName() + '", ' +
+               Math.max(spares.getLastRow() - 2, 0) + ' device(s)');
+  } else {
+    Logger.log('spares tab: MISSING — run setupSparesTab()');
+  }
+  var open = loanerList_().openCount;
+  Logger.log(open + ' loan(s) currently out');
+}
+
+// ---- Data validation --------------------------------------------------------
+// One button on the Reports tab answering "is the data between these books
+// clean?" -- and if not, exactly which rows are wrong.
+//
+// compareBooks() has done most of this since the migration, but it only ever
+// wrote to Logger, so the dashboard could not read it. This is the same
+// comparison returned as JSON the page can group, act on and export, plus the
+// checks that only start to matter once the app itself is writing notes.
+//
+// It reads BOTH workbooks end to end -- roughly 90 tab reads. That makes it a
+// manual button with a spinner, never something on the page-load path. One
+// getValues() per tab does all the work for that tab; adding a second read per
+// tab is what has caused every timeout in this project so far.
+
+var VALIDATE_CACHE_KEY = 'validationReport';
+var VALIDATE_IGNORE_KEY = 'validationIgnored';
+var VALIDATE_GROUP_CAP = 50;          // findings shown per group before "and N more"
+
+// The spares / loaner pool tab. It lives in the check workbook only, by design,
+// so its devices must never be reported as missing from the assignment roster.
+var SPARES_TAB_NAME = 'Spares';
+
+// The loaner ledger. Not created yet -- every check below that touches it is
+// skipped when the tab is absent, so this file is safe to paste before the tab
+// exists.
+var LOANER_SHEET_NAME = 'Loaners';
+
+function isSparesTab_(name) {
+  return String(name || '').trim().toLowerCase() === SPARES_TAB_NAME.toLowerCase();
+}
+
+// Findings the user has waved off. Keyed by group + text, so the same oddity
+// stays quiet across runs but a NEW instance of the same kind still reports.
+function validateIgnored_() {
+  var map = {};
+  var raw = PropertiesService.getScriptProperties().getProperty(VALIDATE_IGNORE_KEY);
+  if (!raw) return map;
+  try {
+    var list = JSON.parse(raw);
+    for (var i = 0; i < list.length; i++) map[list[i]] = true;
+  } catch (e) {
+    // A corrupt property must not stop a validation run.
+  }
+  return map;
+}
+
+function validateIgnore_(p) {
+  var key = String(p.key || '').trim();
+  if (!key) return { ok: false, error: 'no key given' };
+  var props = PropertiesService.getScriptProperties();
+  var list = [];
+  var raw = props.getProperty(VALIDATE_IGNORE_KEY);
+  if (raw) {
+    try { list = JSON.parse(raw); } catch (e) { list = []; }
+  }
+  if (String(p.undo) === '1') {
+    var keep = [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] !== key) keep.push(list[i]);
+    }
+    list = keep;
+  } else if (list.indexOf(key) < 0) {
+    list.push(key);
+  }
+  // A script property tops out near 9KB. Drop the oldest rather than fail.
+  while (JSON.stringify(list).length > 8000) list.shift();
+  props.setProperty(VALIDATE_IGNORE_KEY, JSON.stringify(list));
+  return { ok: true, ignored: list.length };
+}
+
+// Run from the editor when the ignore list has collected things that should be
+// reported again.
+function clearValidationIgnores() {
+  PropertiesService.getScriptProperties().deleteProperty(VALIDATE_IGNORE_KEY);
+  Logger.log('validation ignore list cleared');
+}
+
+// Something that was probably meant to be a serial but is not one: it holds
+// both letters and digits, so it is not a label like "Serial #" or a student
+// name, yet it fails the serial test. A space in the middle, a stray period, a
+// pasted URL. Anything that fails BOTH tests is almost certainly not a serial
+// cell at all, and reporting it would bury the real problems.
+function looksAttemptedSerial_(value) {
+  var s = String(value == null ? '' : value).trim();
+  if (s.length < 5) return false;
+  if (!/[0-9]/.test(s)) return false;
+  if (!/[A-Za-z]/.test(s)) return false;
+  if (looksLikeRosterSerial_(s)) return false;
+  return true;
+}
+
+// One pass over a workbook. Every serial, every spelling of those serials, the
+// cells that look like a failed serial, and -- when asked -- the note cells that
+// will never reach the to-do list. All of it from a single getValues() per tab.
+function validateScan_(id, label, scanNotes) {
+  var out = { label: label, tabs: [], byserial: {}, variants: {},
+              bad: [], notes: [], loanerNotes: [], error: '' };
+  var ss;
+  try { ss = SpreadsheetApp.openById(id); }
+  catch (e) { out.error = String(e); return out; }
+
+  rosterHeadReset_();
+  var tabs = ss.getSheets();
+  for (var i = 0; i < tabs.length; i++) {
+    var sh = tabs[i];
+    var name = sh.getName();
+    if (isNonRosterTab_(name)) continue;
+    if (name === LOANER_SHEET_NAME) continue;
+
+    var info = rosterHeadInfo_(sh);
+    if (!info.serialCol) continue;
+    var dataRow = info.row + 1;
+    var lastRow = sh.getLastRow();
+    var lastCol = sh.getLastColumn();
+    if (lastRow < dataRow || !lastCol) continue;
+
+    out.tabs.push(name);
+    var vals = sh.getRange(dataRow, 1, lastRow - dataRow + 1, lastCol).getValues();
+    var noteCols = [];
+    var loanerCol = 0;
+    if (scanNotes) {
+      noteCols = rosterNoteColumns_(sh);
+      loanerCol = loanerNoteColumn_(sh, false);   // false: never create one while reading
+    }
+
+    for (var r = 0; r < vals.length; r++) {
+      var row = vals[r];
+      var rawSn = row[info.serialCol - 1];
+
+      // A date sitting in the serial column stringifies into something with
+      // letters and digits in it. It is wrong, but it is not a mistyped serial,
+      // and flagging it fills the report with noise from second tables whose
+      // columns do not line up with the first.
+      var isDate = (Object.prototype.toString.call(rawSn) === '[object Date]');
+      var sn = String(rawSn == null ? '' : rawSn).trim();
+
+      if (sn && !isDate) {
+        if (looksLikeRosterSerial_(sn)) {
+          var key = sn.toUpperCase();
+          if (!out.byserial[key]) out.byserial[key] = [];
+          if (out.byserial[key].indexOf(name) < 0) out.byserial[key].push(name);
+
+          // Every spelling seen, so "5cd1234abc " and "5CD1234ABC" can be
+          // reported as one device typed two ways. A trailing space is
+          // invisible in Sheets and breaks every match in this script.
+          var spelling = String(rawSn);
+          if (!out.variants[key]) out.variants[key] = [];
+          if (out.variants[key].indexOf(spelling) < 0) out.variants[key].push(spelling);
+        } else if (looksAttemptedSerial_(sn)) {
+          out.bad.push({ tab: name, row: dataRow + r, value: sn });
+        }
+      }
+
+      // Note cells that will never become a to-do. Only text counts: ticked
+      // checkboxes, counts and dates are supposed to be ignored, and the junk
+      // words ("ok", "na", "x") are deliberate shorthand rather than mistakes.
+      for (var n = 0; n < noteCols.length; n++) {
+        var cell = row[noteCols[n] - 1];
+        if (typeof cell !== 'string') continue;
+        var text = cell.trim();
+        if (!text) continue;
+        if (NOTE_JUNK_RE.test(text)) continue;
+        if (isRealNote_(text)) continue;
+        out.notes.push({ tab: name, row: dataRow + r, col: noteCols[n], value: text });
+      }
+
+      // Loaner notes are collected whole, not judged. Section 8 checks them
+      // against the ledger, which is the only thing that knows what is out.
+      if (loanerCol) {
+        var lnv = String(row[loanerCol - 1] || '').trim();
+        if (lnv) out.loanerNotes.push({ tab: name, row: dataRow + r, value: lnv });
+      }
+    }
+  }
+  return out;
+}
+
+// Why a note cell was passed over, in the words the report shows.
+// The set of carts a device sits on, normalised and order-independent, so two
+// books that file it the same way compare equal however their tabs are ordered
+// or prefixed. normCart_ already folds "C-Cart F" and "iPad's" onto "cartf" and
+// "ipads"; this is what makes the comparison about filing rather than ordering.
+function cartSetKey_(tabs) {
+  var norm = [];
+  for (var i = 0; i < tabs.length; i++) {
+    var n = normCart_(tabs[i]);
+    if (norm.indexOf(n) < 0) norm.push(n);
+  }
+  norm.sort();
+  return norm.join('+');
+}
+
+function noteRejectReason_(text) {
+  var s = String(text || '').trim();
+  if (s.length < 3) return 'under 3 characters';
+  if (!/[a-z]{2}/i.test(s)) return 'no two letters together, so it does not read as words';
+  return 'does not read as a note';
+}
+
+function validateData_(p) {
+  var began = new Date().getTime();
+  var ignored = validateIgnored_();
+  var findings = [];
+
+  // Findings are capped per group for display, but the counts on the tiles must
+  // be the real numbers -- the first run reported "103 blockers" while the list
+  // itself said "and 140 more", which is worse than either number alone.
+  var tally = { blocker: 0, warn: 0, info: 0 };
+
+  function add(sev, group, text, extra, silent) {
+    var key = group + '|' + text;
+    if (ignored[key]) return;
+    if (!silent) tally[sev]++;
+    var f = { sev: sev, group: group, text: text, key: key };
+    if (extra) {
+      if (extra.book) f.book = extra.book;
+      if (extra.tab) f.tab = extra.tab;
+      if (extra.row) f.row = extra.row;
+      if (extra.fix) f.fix = extra.fix;
+    }
+    findings.push(f);
+  }
+
+  // Adds a whole list under one group, capped so a single bad import cannot
+  // return ten thousand rows to the browser.
+  function addList(sev, group, list, extra) {
+    var shown = list.length;
+    if (shown > VALIDATE_GROUP_CAP) shown = VALIDATE_GROUP_CAP;
+    for (var i = 0; i < shown; i++) add(sev, group, list[i].text, list[i].at || extra);
+    if (list.length > shown) {
+      // The marker line is not itself a finding, so it is added silently and the
+      // rows it stands for are tallied instead.
+      add(sev, group, '… and ' + (list.length - shown) + ' more', extra, true);
+      tally[sev] += (list.length - shown);
+    }
+  }
+
+  var A = validateScan_(ASSIGNMENT_SHEET_ID, 'assignment roster', false);
+  if (A.error) return { ok: false, error: 'assignment roster: ' + A.error };
+  var C = validateScan_(ROSTER_SHEET_ID, 'check workbook', true);
+  if (C.error) return { ok: false, error: 'check workbook: ' + C.error };
+
+  // Serials that only ever appear on the spares tab belong to one book on
+  // purpose, and are exempt from the cross-book comparison below.
+  var sparesOnly = {};
+  for (var sp in C.byserial) {
+    var onlySpares = true;
+    for (var t = 0; t < C.byserial[sp].length; t++) {
+      if (!isSparesTab_(C.byserial[sp][t])) { onlySpares = false; break; }
+    }
+    if (onlySpares) sparesOnly[sp] = true;
+  }
+
+  // ---- 1. cells that look like a broken serial ----
+  var badList = [];
+  A.bad.forEach(function (b) {
+    badList.push({ text: 'assignment · ' + b.tab + ' row ' + b.row + '   "' + b.value + '"',
+                   at: { book: 'assignment', tab: b.tab, row: b.row } });
+  });
+  C.bad.forEach(function (b) {
+    badList.push({ text: 'check · ' + b.tab + ' row ' + b.row + '   "' + b.value + '"',
+                   at: { book: 'check', tab: b.tab, row: b.row } });
+  });
+  addList('blocker', 'Cell in the serial column is not a valid serial', badList);
+
+  // ---- 2. one serial typed two different ways ----
+  var variantList = [];
+  function collectVariants(scan, bookLabel) {
+    for (var k in scan.variants) {
+      if (scan.variants[k].length < 2) continue;
+      var quoted = [];
+      for (var v = 0; v < scan.variants[k].length; v++) quoted.push('"' + scan.variants[k][v] + '"');
+      variantList.push({ text: bookLabel + ' · ' + k + '   typed as ' + quoted.join(' and '),
+                         at: { book: bookLabel } });
+    }
+  }
+  collectVariants(A, 'assignment');
+  collectVariants(C, 'check');
+  addList('blocker', 'Same serial spelled more than one way', variantList);
+
+  // ---- 3. a device listed on a lot of tabs inside one book ----
+  //
+  // Being on TWO tabs is normal in this data and always has been -- the pooled
+  // carts (E, W) and the per-teacher iPad lists deliberately repeat devices that
+  // also sit on a home cart, which is exactly why the to-do page shows the notes
+  // each tab carries rather than deduping across tabs. Flagging that produced
+  // 191 "blockers" describing the filing system.
+  //
+  // Three or more tabs is a different story, so that is what this reports, and
+  // as a notice. Change 'info' to 'blocker' and the floor from 2 to 1 to go back
+  // to reporting every repeat.
+  var manyTabs = [];
+  function collectManyTabs(scan, bookLabel) {
+    for (var k in scan.byserial) {
+      if (scan.byserial[k].length < 3) continue;
+      manyTabs.push({ text: bookLabel + ' · ' + k + '   ' + scan.byserial[k].join(' | '),
+                      at: { book: bookLabel, tab: scan.byserial[k][0] } });
+    }
+  }
+  collectManyTabs(A, 'assignment');
+  collectManyTabs(C, 'check');
+  addList('info', 'Device listed on three or more tabs in one book', manyTabs);
+
+  // ---- 4. the same device filed differently in the two books ----
+  var movedList = [], missingFromC = [], missingFromA = [];
+  for (var snA in A.byserial) {
+    if (!C.byserial[snA]) {
+      missingFromC.push({ text: snA + '   assignment: ' + A.byserial[snA].join(', '),
+                          at: { book: 'assignment', tab: A.byserial[snA][0] } });
+      continue;
+    }
+    // Compare the whole SET of tabs, not the first one in each book.
+    //
+    // The books list their tabs in their own order, so "Cart W / Cart F" and
+    // "C-Cart F / C-Cart W" are the same filing read two different ways --
+    // comparing element [0] of each called every one of those a mismatch, and
+    // that alone accounted for most of the 86 findings in this group.
+    if (cartSetKey_(A.byserial[snA]) !== cartSetKey_(C.byserial[snA])) {
+      movedList.push({ text: snA + '   assignment: ' + A.byserial[snA].join('/') +
+                             '   check: ' + C.byserial[snA].join('/'),
+                       at: { book: 'assignment', tab: A.byserial[snA][0] } });
+    }
+  }
+  for (var snC in C.byserial) {
+    if (A.byserial[snC]) continue;
+    if (sparesOnly[snC]) continue;
+    missingFromA.push({ text: snC + '   check: ' + C.byserial[snC].join(', '),
+                        at: { book: 'check', tab: C.byserial[snC][0] } });
+  }
+  addList('blocker', 'On different carts in the two books', movedList);
+  addList('warn', 'In the assignment roster but not the check workbook', missingFromC);
+  addList('warn', 'In the check workbook but not the assignment roster', missingFromA);
+
+  // ---- 5. tabs that exist in one book only ----
+  // Both sides filtered the same way, and only for Spares -- which genuinely
+  // lives in one book.
+  //
+  // This used to drop TODO_SKIP_TABS from the check side only, on the wrong
+  // assumption that the per-teacher lists were check-book-only. They are in both
+  // books, so filtering one side reported Crider, Palsa, Aeh and the rest as
+  // "assignment only" when they match perfectly. Filtering neither side also
+  // means a genuine naming split -- "B Miller" against "Buechner" -- reports for
+  // the right reason instead of being hidden by the skip list.
+  var an = {}, cn = {};
+  function collectTabKeys(tabs, into) {
+    for (var i = 0; i < tabs.length; i++) {
+      if (isSparesTab_(tabs[i])) continue;
+      into[normCart_(tabs[i])] = tabs[i];
+    }
+  }
+  collectTabKeys(A.tabs, an);
+  collectTabKeys(C.tabs, cn);
+  var tabOnly = [];
+  for (var ka in an) {
+    if (!cn[ka]) tabOnly.push({ text: 'assignment only · ' + an[ka], at: { book: 'assignment', tab: an[ka] } });
+  }
+  for (var kc in cn) {
+    if (!an[kc]) tabOnly.push({ text: 'check only · ' + cn[kc], at: { book: 'check', tab: cn[kc] } });
+  }
+  addList('warn', 'Cart tab exists in one book only', tabOnly);
+
+  // ---- 6. serials stored on tickets ----
+  var urlRows = [];
+  try {
+    var bad = badSerialRows_();
+    bad.forEach(function (b) {
+      urlRows.push({ text: b.tab + ' row ' + b.row + '   "' + b.was + '"  →  ' + b.now,
+                     at: { book: 'tickets', tab: b.tab, row: b.row, fix: 'serials' } });
+    });
+  } catch (e) {
+    add('warn', 'Could not read the ticket book', String(e));
+  }
+  addList('warn', 'Ticket serial stored as a URL or label', urlRows, { fix: 'serials' });
+
+  var unknownTicket = [];
+  try {
+    var live = firstSheet_();
+    var lastT = live.getLastRow();
+    if (lastT > 1) {
+      var col = live.getRange(2, 1, lastT - 1, 1).getValues();
+      var seenT = {};
+      for (var tr = 0; tr < col.length; tr++) {
+        var ts = String(col[tr][0] || '').trim().toUpperCase();
+        if (!ts) continue;
+        if (seenT[ts]) continue;
+        seenT[ts] = true;
+        if (A.byserial[ts] || C.byserial[ts]) continue;
+        unknownTicket.push({ text: ts + '   (ticket sheet row ' + (tr + 2) + ')',
+                             at: { book: 'tickets', tab: live.getName(), row: tr + 2 } });
+      }
+    }
+  } catch (e2) {
+    add('warn', 'Could not read ticket serials', String(e2));
+  }
+  addList('warn', 'Open ticket for a serial that is in neither book', unknownTicket);
+
+  // ---- 7. the to-do list against the check workbook ----
+  try {
+    var todos = todoList_().todos;
+    var cartNames = {};
+    C.tabs.forEach(function (n) { cartNames[n] = true; });
+    var badCart = [], badSn = [];
+    for (var i2 = 0; i2 < todos.length; i2++) {
+      var td = todos[i2];
+      if (String(td.id).indexOf('roster-') !== 0) continue;
+      if (td.group && !cartNames[td.group]) {
+        badCart.push({ text: td.group + '   ::   ' + td.text });
+      }
+      var m = String(td.text).match(/S\/N\s+([A-Za-z0-9]+)\)/);
+      if (m && !C.byserial[m[1].toUpperCase()]) {
+        badSn.push({ text: m[1] + '   ::   ' + td.text });
+      }
+    }
+    addList('warn', 'To-do sitting on a cart that no longer exists', badCart);
+    addList('warn', 'To-do whose serial is not in the check workbook', badSn);
+  } catch (e3) {
+    add('warn', 'Could not read the to-do list', String(e3));
+  }
+
+  // ---- 8. the loaner ledger against the notes it is supposed to have written ----
+  // The ledger is the record; the notes on the devices are its mirror. So every
+  // check here reads one way -- ledger first, notes second -- and each finding
+  // is fixable by re-syncing the notes rather than by editing them.
+  try {
+    var ledger = ticketBook_().getSheetByName(LOANER_SHEET_NAME);
+    if (ledger && ledger.getLastRow() > 1) {
+      var loans = loanerList_().loans;
+      var openBy = {}, dupOpen = [], badDates = [], unknownLoan = [], missingNote = [];
+      var expected = {};        // every note text the ledger says should exist
+
+      // Every loaner note actually on a device, gathered once by validateScan_.
+      var found = {};
+      for (var fn = 0; fn < C.loanerNotes.length; fn++) found[C.loanerNotes[fn].value] = true;
+
+      for (var li = 0; li < loans.length; li++) {
+        var L = loans[li];
+        var inopKey = L.inopSn.toUpperCase();
+        var loanKey = L.loanerSn.toUpperCase();
+
+        if (L.dateOut && L.dateIn && new Date(L.dateIn) < new Date(L.dateOut)) {
+          badDates.push({ text: 'row ' + L.row + '   out ' + loanerShortDate_(L.dateOut) +
+                                ', back ' + loanerShortDate_(L.dateIn),
+                          at: { book: 'loaners', row: L.row } });
+        }
+
+        if (!L.open) continue;
+
+        if (loanKey) {
+          if (openBy[loanKey]) {
+            dupOpen.push({ text: L.loanerSn + '   open on rows ' + openBy[loanKey] + ' and ' + L.row,
+                           at: { book: 'loaners', row: L.row } });
+          } else {
+            openBy[loanKey] = L.row;
+          }
+        }
+        if (inopKey && !A.byserial[inopKey] && !C.byserial[inopKey]) {
+          unknownLoan.push({ text: L.inopSn + '   broken device, Loaners row ' + L.row,
+                             at: { book: 'loaners', row: L.row } });
+        }
+        if (loanKey && !A.byserial[loanKey] && !C.byserial[loanKey]) {
+          unknownLoan.push({ text: L.loanerSn + '   loaner, Loaners row ' + L.row,
+                             at: { book: 'loaners', row: L.row } });
+        }
+
+        // Does the note the ledger implies actually exist on the device?
+        var wantInop = loanerInopNote_(L.loanerSn, L.dateOut, L.source);
+        var wantOut = loanerOutNote_(L.student, L.inopSn, L.dateOut);
+        expected[wantInop] = true;
+        expected[wantOut] = true;
+
+        if (!found[wantInop]) {
+          missingNote.push({ text: L.inopSn + '   row ' + L.row + '   expected: "' + wantInop + '"',
+                             at: { book: 'loaners', row: L.row, fix: 'resync' } });
+        }
+        if (!found[wantOut]) {
+          missingNote.push({ text: L.loanerSn + '   row ' + L.row + '   expected: "' + wantOut + '"',
+                             at: { book: 'loaners', row: L.row, fix: 'resync' } });
+        }
+      }
+
+      // The other direction: a loaner note on a device the ledger says nothing
+      // about. Usually a return that got half done by hand.
+      var orphanNote = [];
+      for (var on = 0; on < C.loanerNotes.length; on++) {
+        var note = C.loanerNotes[on];
+        if (expected[note.value]) continue;
+        orphanNote.push({ text: note.tab + ' row ' + note.row + '   "' + note.value + '"',
+                          at: { book: 'check', tab: note.tab, row: note.row, fix: 'resync' } });
+      }
+
+      addList('blocker', 'Same loaner out on two open rows', dupOpen);
+      addList('blocker', 'Loaner returned before it went out', badDates);
+      addList('warn', 'Loan is open but its note is missing from the device', missingNote, { fix: 'resync' });
+      addList('warn', 'Loaner note on a device with no open loan behind it', orphanNote, { fix: 'resync' });
+      addList('warn', 'Loaner serial not found in either book', unknownLoan);
+    }
+  } catch (e4) {
+    add('warn', 'Could not read the loaner ledger', String(e4));
+  }
+
+  // ---- 9. notes that will never become a to-do ----
+  var noteList = [];
+  C.notes.forEach(function (n) {
+    noteList.push({ text: n.tab + ' row ' + n.row + '   "' + n.value + '"   — ' + noteRejectReason_(n.value),
+                    at: { book: 'check', tab: n.tab, row: n.row } });
+  });
+  addList('info', 'Note that will never become a to-do', noteList);
+
+  var out = {
+    ok: true,
+    runAt: new Date().toISOString(),
+    seconds: Math.round((new Date().getTime() - began) / 1000),
+    counts: tally,
+    findings: findings,
+    scanned: {
+      assignmentTabs: A.tabs.length, assignmentSerials: Object.keys(A.byserial).length,
+      checkTabs: C.tabs.length, checkSerials: Object.keys(C.byserial).length
+    }
+  };
+
+  // Cached so re-opening the Reports tab shows the last run rather than paying
+  // 90 tab reads again. Cache values top out near 100KB; an oversized report
+  // simply is not cached.
+  try {
+    var json = JSON.stringify(out);
+    if (json.length < 90000) CacheService.getScriptCache().put(VALIDATE_CACHE_KEY, json, 21600);
+  } catch (e5) {
+    // Caching is a convenience; never fail the run over it.
+  }
+  return out;
+}
+
+// The last run, if it is still cached. Lets the page show a report on open
+// without ever triggering the walk itself.
+function validateLast_() {
+  var json = null;
+  try { json = CacheService.getScriptCache().get(VALIDATE_CACHE_KEY); } catch (e) { json = null; }
+  if (!json) return { ok: true, empty: true };
+  try { return JSON.parse(json); } catch (e2) { return { ok: true, empty: true }; }
+}
+
+// The one fix the validator can apply itself: rewriting ticket serials that were
+// stored as a URL or a "S/N: ..." label. fixStoredSerials() already did this
+// from the editor; this is the same call with a return value for the page.
+function validateFixSerials_() {
+  try {
+    var n = fixStoredSerials();
+    return { ok: true, fixed: n };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 // ---- Ticket submissions ----
