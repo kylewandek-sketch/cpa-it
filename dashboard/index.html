@@ -199,6 +199,60 @@
   .vnum { font-size:10px; color:var(--muted); margin-bottom:2px; }
   .vbar { width:72%; border-radius:4px 4px 0 0; min-height:2px; background:#2f6fe0; }
   .vcap { font-size:10px; color:var(--muted); margin-top:5px; white-space:nowrap; }
+
+  /* Data validation panel. Severity is carried by an icon and a word as well as
+     a colour, so it still reads on a mono screen or to a colour-blind eye. The
+     counts themselves stay in ink -- only the dot beside them is coloured. */
+  .vsum { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 14px; }
+  .vsum .stat { min-width:104px; }
+  .vsum .stat .l { display:flex; align-items:center; gap:6px; }
+  .vdot { width:9px; height:9px; border-radius:50%; flex:none; display:inline-block; }
+  .vgroup { border:1px solid var(--line); border-radius:10px; margin-bottom:8px; overflow:hidden; }
+  .vgroup > summary { padding:10px 12px; cursor:pointer; font-size:13.5px; font-weight:600;
+                      display:flex; align-items:center; gap:9px; list-style:none; }
+  .vgroup > summary::-webkit-details-marker { display:none; }
+  .vgroup > summary::marker { content:''; }
+  .vgroup > summary .gn { margin-left:auto; color:var(--muted); font-weight:500; font-size:12.5px; }
+  .vrow { display:flex; align-items:center; gap:10px; padding:7px 12px 7px 30px;
+          border-top:1px solid var(--line); }
+  .vrow .t { flex:1; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;
+             word-break:break-word; line-height:1.5; }
+  .vrow .where { color:var(--muted); font-size:11.5px; white-space:nowrap; }
+  .vrow .btn { padding:3px 9px; font-size:11.5px; }
+  .vclean { padding:14px 12px; color:var(--green); font-size:13.5px; font-weight:600; }
+
+  /* Loaners. The days-out bar is magnitude, so it is one bar on one scale; the
+     colour only shifts once a loan crosses the thresholds at the top of the
+     loaner code, and the number is always printed beside it. */
+  .lo-field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
+  .lo-field label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .lo-field input { padding:8px 10px; border-radius:8px; border:1px solid var(--line);
+                    background:var(--card); color:var(--ink); font-size:14px; }
+  .lo-hint { font-size:11.5px; color:var(--muted); }
+  .lo-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:0 14px; }
+  .lo-open { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:10px;
+             border:1px solid var(--line); background:var(--page); margin-bottom:12px; font-size:13.5px; }
+  .daysbar { display:flex; align-items:center; gap:7px; min-width:96px; }
+  .daysbar .track { flex:1; height:6px; border-radius:3px; background:var(--line); overflow:hidden; }
+  .daysbar .fill { height:100%; border-radius:3px; background:#2f6fe0; }
+  .daysbar .num { font-size:12px; font-weight:700; width:26px; text-align:right; }
+
+  /* Editor */
+  .ed-mode.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+  .ed-cell { cursor:text; }
+  .ed-cell:hover { background:var(--page); }
+  .ed-lock { color:var(--muted); cursor:not-allowed; white-space:nowrap; }
+  .ed-dirty { background:rgba(196,125,0,.16); font-weight:600; }
+  .ed-cell input { width:100%; box-sizing:border-box; padding:3px 5px; font-size:13px;
+                   border:1px solid var(--blue); border-radius:5px;
+                   background:var(--card); color:var(--ink); }
+  .ed-bar { position:sticky; bottom:0; z-index:5; margin-top:14px; padding:10px 14px;
+            border:1px solid var(--line); border-radius:12px; background:var(--card);
+            box-shadow:0 -4px 16px rgba(0,0,0,.10); display:flex; align-items:center; gap:10px; }
+  .ed-head { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; margin-bottom:10px; }
+  .ed-diff { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; line-height:1.7; }
+  .ed-diff .was { color:var(--muted); text-decoration:line-through; }
+  .ed-diff .now { color:var(--green); font-weight:600; }
 </style>
 </head>
 <body>
@@ -231,6 +285,7 @@
       <button id="tabReports" class="tab">Reports</button>
       <button id="tabLookup" class="tab">Lookup</button>
       <button id="tabTodo" class="tab">To-Do</button>
+      <button id="tabEditor" class="tab">Editor</button>
     </div>
     <div class="stats" id="stats"></div>
 
@@ -276,6 +331,50 @@
         </div>
       </div>
       <div id="lu_results" style="margin-top:14px"></div>
+      <div id="lu_loaners" style="margin-top:14px"></div>
+    </div>
+
+    <div id="editorView" class="hidden">
+      <div class="controls">
+        <button class="btn ed-mode active" data-mode="browse">Browse a sheet</button>
+        <button class="btn ed-mode" data-mode="batch">Batch edit</button>
+        <span style="flex:1"></span>
+        <button class="btn" id="ed_undoBtn">↶ Undo a save</button>
+      </div>
+
+      <div id="ed_browseWrap">
+        <div class="chart-card">
+          <div class="controls" style="margin-bottom:0">
+            <select id="ed_book">
+              <option value="assignment">2026-2027 Chromebook Carts / iPads</option>
+              <option value="check">Start-of-Year Check</option>
+              <option value="tickets">Tickets</option>
+            </select>
+            <select id="ed_tab"><option value="">Loading tabs…</option></select>
+            <input type="search" id="ed_filter" placeholder="filter rows…" style="min-width:200px">
+            <button class="btn" id="ed_reload">⟳ Reload</button>
+          </div>
+        </div>
+        <div id="ed_grid" style="margin-top:14px"></div>
+      </div>
+
+      <div id="ed_batchWrap" class="hidden">
+        <div class="chart-card">
+          <div class="rnote">Search every book at once, tick the rows you want, then apply one
+            change to all of them. The basket keeps what you ticked while you run another search.</div>
+          <div class="controls" style="margin-bottom:0">
+            <input type="search" id="ed_q" placeholder="serial, student, note text…" style="min-width:260px">
+            <label class="rnote"><input type="checkbox" class="ed-bk" value="check" checked> Check</label>
+            <label class="rnote"><input type="checkbox" class="ed-bk" value="assignment" checked> Assignment</label>
+            <label class="rnote"><input type="checkbox" class="ed-bk" value="tickets"> Tickets</label>
+            <button class="btn primary" id="ed_search">Search</button>
+          </div>
+        </div>
+        <div id="ed_hits" style="margin-top:14px"></div>
+        <div id="ed_basket" style="margin-top:14px"></div>
+      </div>
+
+      <div id="ed_bar" class="ed-bar hidden"></div>
     </div>
 
     <div id="todoView" class="hidden">
@@ -10733,7 +10832,8 @@ function updateField(row, fields) {
 
 // ---- Reports (charts from the currently loaded tickets) ----
 var activeTab = 'tickets';
-var TABS = { tickets: 'tabTickets', reports: 'tabReports', lookup: 'tabLookup', todo: 'tabTodo' };
+var TABS = { tickets: 'tabTickets', reports: 'tabReports', lookup: 'tabLookup',
+             todo: 'tabTodo', editor: 'tabEditor' };
 Object.keys(TABS).forEach(function (name) {
   document.getElementById(TABS[name]).onclick = function () { setTab(name); };
 });
@@ -10745,7 +10845,461 @@ function setTab(t) {
   });
   if (t === 'reports') renderReports();
   if (t === 'todo') loadTodos();
+  if (t === 'lookup') loadLoaners(false);
+  if (t === 'editor') edInit();
   if (t !== 'lookup') stopScan();
+}
+
+// ---- Editor ----------------------------------------------------------------
+// Two ways in. Browse loads one tab of one book into an editable grid; Batch
+// searches all three books at once and applies a single change to rows you have
+// ticked from anywhere.
+//
+// Nothing is written as you type. Edits collect in edPending, you look at a
+// before/after list, and only then does anything reach a sheet -- and each write
+// carries the value the grid last saw, so a cell somebody changed in Sheets in
+// the meantime is refused rather than clobbered.
+
+var edReady = false;
+var edBook = 'assignment';
+var edTab = '';
+var edData = null;              // the tab currently in the grid
+var edFilter = '';
+var edPending = {};             // "book|tab|row|col" -> { b, t, r, c, w, n }
+var edBasket = [];              // batch mode: hits ticked, kept across searches
+var edHits = null;
+
+function edKey(b, t, r, c) { return b + '|' + t + '|' + r + '|' + c; }
+function edCount() { return Object.keys(edPending).length; }
+
+function edInit() {
+  if (edReady) { edBar(); return; }
+  edReady = true;
+
+  Array.prototype.forEach.call(document.querySelectorAll('.ed-mode'), function (b) {
+    b.onclick = function () {
+      var mode = this.getAttribute('data-mode');
+      Array.prototype.forEach.call(document.querySelectorAll('.ed-mode'), function (o) {
+        o.classList.toggle('active', o === b);
+      });
+      document.getElementById('ed_browseWrap').classList.toggle('hidden', mode !== 'browse');
+      document.getElementById('ed_batchWrap').classList.toggle('hidden', mode !== 'batch');
+    };
+  });
+
+  document.getElementById('ed_book').onchange = function () {
+    edBook = this.value; edLoadTabs();
+  };
+  document.getElementById('ed_tab').onchange = function () {
+    edTab = this.value; edLoadGrid();
+  };
+  document.getElementById('ed_reload').onclick = function () { edLoadGrid(); };
+  document.getElementById('ed_filter').oninput = function () {
+    edFilter = this.value; edRenderGrid();
+  };
+  document.getElementById('ed_search').onclick = edSearch;
+  document.getElementById('ed_q').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') edSearch();
+  });
+  document.getElementById('ed_undoBtn').onclick = edUndoPrompt;
+
+  edLoadTabs();
+  edBar();
+}
+
+function edLoadTabs() {
+  var sel = document.getElementById('ed_tab');
+  sel.innerHTML = '<option value="">Loading tabs…</option>';
+  jsonp({ action: 'gridTabs', token: token, book: edBook }, 60000).then(function (r) {
+    if (!r || r.ok === false) { sel.innerHTML = '<option value="">Could not load tabs</option>'; return; }
+    sel.innerHTML = r.tabs.map(function (t) {
+      return '<option value="' + esc(t) + '">' + esc(t) + '</option>';
+    }).join('');
+    edTab = r.tabs[0] || '';
+    sel.value = edTab;
+    edLoadGrid();
+  }).catch(function (err) {
+    sel.innerHTML = '<option value="">' + esc(err.message) + '</option>';
+  });
+}
+
+function edLoadGrid() {
+  if (!edTab) return;
+  var el = document.getElementById('ed_grid');
+  el.innerHTML = '<div class="rnote">Loading ' + esc(edTab) + '…</div>';
+  jsonp({ action: 'gridRead', token: token, book: edBook, tab: edTab }, 60000).then(function (r) {
+    if (!r || r.ok === false) {
+      el.innerHTML = '<div class="rnote">' + esc((r && r.error) || 'Could not read that tab.') + '</div>';
+      return;
+    }
+    edData = r;
+    edRenderGrid();
+  }).catch(function (err) {
+    el.innerHTML = '<div class="rnote">' + esc(err.message) + '</div>';
+  });
+}
+
+function edRenderGrid() {
+  var el = document.getElementById('ed_grid');
+  if (!edData) { el.innerHTML = ''; return; }
+  var d = edData;
+
+  // Teacher and room live on row 1 and belong to the whole tab, so they are
+  // shown apart from the grid -- editing one is not a row edit, and the confirm
+  // before saving says how many devices it covers.
+  var head = '';
+  if (d.headerRow > 1) {
+    head = '<div class="ed-head">' +
+      edHeadField('Teacher', 1, 1, d.title) +
+      edHeadField('Room', 1, 2, d.room) +
+      '</div>';
+  }
+
+  var rows = d.rows;
+  if (edFilter) {
+    var q = edFilter.toLowerCase();
+    rows = rows.filter(function (row) {
+      return row.cells.join(' ').toLowerCase().indexOf(q) >= 0;
+    });
+  }
+
+  var note = rows.length + ' of ' + d.total + ' row' + (d.total === 1 ? '' : 's');
+  if (d.truncated) note += ' · showing the first ' + d.rows.length + ' — use the filter or Batch mode for the rest';
+
+  var h = '<div class="chart-card">' + head +
+    '<div class="rnote">' + esc(note) + '</div>' +
+    '<div class="tablewrap"><table><thead><tr><th>Row</th>' +
+    d.headers.map(function (hd, i) {
+      var lock = '';
+      if (d.serialCol && (i + 1) === d.serialCol) lock = ' 🔒';
+      return '<th>' + (esc(hd) || '<span class="muted">col ' + (i + 1) + '</span>') + lock + '</th>';
+    }).join('') + '</tr></thead><tbody>';
+
+  rows.forEach(function (row) {
+    h += '<tr><td class="muted">' + row.row + '</td>';
+    row.cells.forEach(function (v, i) {
+      var col = i + 1;
+      if (d.serialCol && col === d.serialCol) {
+        h += '<td class="ed-lock" title="Serial columns are locked. Fix a serial in Sheets.">' +
+          esc(v) + ' 🔒</td>';
+        return;
+      }
+      var pend = edPending[edKey(d.book, d.tab, row.row, col)];
+      var cls = 'ed-cell';
+      var shown = v;
+      if (pend) { cls += ' ed-dirty'; shown = pend.n; }
+      h += '<td class="' + cls + '" data-r="' + row.row + '" data-c="' + col + '">' + esc(shown) + '</td>';
+    });
+    h += '</tr>';
+  });
+  h += '</tbody></table></div></div>';
+  el.innerHTML = h;
+
+  Array.prototype.forEach.call(el.querySelectorAll('.ed-cell'), function (td) {
+    td.onclick = function () { edEditCell(this); };
+  });
+  Array.prototype.forEach.call(el.querySelectorAll('[data-head]'), function (inp) {
+    inp.onchange = function () {
+      var c = Number(this.getAttribute('data-head'));
+      edStage(edData.book, edData.tab, 1, c, this.getAttribute('data-was'), this.value);
+    };
+  });
+  edBar();
+}
+
+// data-was stays the value the sheet holds, so re-editing the field always
+// compares against the sheet rather than against your own last keystroke. The
+// box itself shows a staged edit, so filtering the grid does not appear to throw
+// one away.
+function edHeadField(label, row, col, value) {
+  var shown = value || '';
+  var pend = edPending[edKey(edData.book, edData.tab, row, col)];
+  if (pend) shown = pend.n;
+  return '<div class="lo-field" style="margin-bottom:0;min-width:200px">' +
+    '<label>' + esc(label) + ' — whole tab</label>' +
+    '<input data-head="' + col + '" data-was="' + esc(value || '') + '" value="' + esc(shown) + '">' +
+    '</div>';
+}
+
+function edEditCell(td) {
+  if (td.querySelector('input')) return;
+  var r = Number(td.getAttribute('data-r'));
+  var c = Number(td.getAttribute('data-c'));
+  var original = edOriginal(r, c);
+  var current = td.textContent;
+
+  var inp = document.createElement('input');
+  inp.value = current;
+  td.textContent = '';
+  td.appendChild(inp);
+  inp.focus();
+  inp.select();
+
+  function done() {
+    var val = inp.value;
+    edStage(edData.book, edData.tab, r, c, original, val);
+    edRenderGrid();
+  }
+  inp.onblur = done;
+  inp.onkeydown = function (e) {
+    if (e.key === 'Enter') { inp.blur(); }
+    if (e.key === 'Escape') { inp.onblur = null; edRenderGrid(); }
+  };
+}
+
+function edOriginal(r, c) {
+  var found = '';
+  edData.rows.forEach(function (row) {
+    if (row.row === r) found = row.cells[c - 1];
+  });
+  return found;
+}
+
+// Records an edit, or drops it again if you typed the original value back.
+function edStage(book, tab, r, c, was, now) {
+  var key = edKey(book, tab, r, c);
+  if (String(was) === String(now)) { delete edPending[key]; edBar(); return; }
+  edPending[key] = { b: book, t: tab, r: r, c: c, w: String(was), n: String(now) };
+  edBar();
+}
+
+function edBar() {
+  var bar = document.getElementById('ed_bar');
+  if (!bar) return;
+  var n = edCount();
+  bar.classList.toggle('hidden', n === 0);
+  if (!n) return;
+  bar.innerHTML = '<b>' + n + '</b> change' + (n === 1 ? '' : 's') + ' pending' +
+    '<span style="flex:1"></span>' +
+    '<button class="btn" id="ed_discard">Discard</button>' +
+    '<button class="btn primary" id="ed_review">Review &amp; save →</button>';
+  document.getElementById('ed_discard').onclick = function () {
+    if (!confirm('Throw away ' + edCount() + ' pending change(s)?')) return;
+    edPending = {};
+    if (edData) edRenderGrid();
+    edBar();
+  };
+  document.getElementById('ed_review').onclick = edReview;
+}
+
+function edReview() {
+  var list = Object.keys(edPending).map(function (k) { return edPending[k]; });
+  var wholeTab = list.filter(function (e) { return e.r === 1; }).length;
+
+  var lines = list.map(function (e) {
+    var where = e.t + ' · row ' + e.r + ' · col ' + e.c;
+    if (e.r === 1) where = e.t + ' · whole tab';
+    var was = e.w;
+    if (!was) was = '(empty)';
+    var now = e.n;
+    if (!now) now = '(cleared)';
+    return where + '\n      ' + was + '  ->  ' + now;
+  });
+
+  var msg = 'Write ' + list.length + ' change(s)?\n\n' + lines.join('\n');
+  if (wholeTab) {
+    msg += '\n\n' + wholeTab + ' of these change a whole tab (teacher or room), ' +
+      'not one device.';
+  }
+  if (!confirm(msg)) return;
+  edSave(list);
+}
+
+// JSONP is a GET, so a big save does not fit in one URL. The edits go in chunks
+// that stay well inside a safe URL length, one after another, all carrying the
+// same batch id -- so an undo puts the whole save back regardless of how many
+// requests it took.
+function edChunk(list) {
+  var chunks = [], cur = [], len = 0;
+  list.forEach(function (e) {
+    var size = encodeURIComponent(JSON.stringify(e)).length;
+    if (cur.length && (len + size) > 1200) { chunks.push(cur); cur = []; len = 0; }
+    cur.push(e); len += size;
+  });
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+
+function edSave(list) {
+  var batch = 'b' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  var chunks = edChunk(list);
+  var applied = 0;
+  var refused = [];
+  var bar = document.getElementById('ed_bar');
+  bar.innerHTML = 'Saving…';
+
+  var chain = Promise.resolve();
+  chunks.forEach(function (chunk, ci) {
+    chain = chain.then(function () {
+      bar.innerHTML = 'Saving… chunk ' + (ci + 1) + ' of ' + chunks.length;
+      return jsonp({ action: 'gridWrite', token: token, batch: batch,
+                     edits: JSON.stringify(chunk) }, 120000).then(function (r) {
+        if (!r || r.ok === false) throw new Error((r && r.error) || 'write failed');
+        applied += r.applied;
+        r.results.forEach(function (res, i) {
+          if (!res.ok) refused.push(chunk[i].t + ' row ' + chunk[i].r + ' col ' + chunk[i].c + ' — ' + res.why);
+        });
+      });
+    });
+  });
+
+  chain.then(function () {
+    edPending = {};
+    if (refused.length) {
+      toast(applied + ' saved, ' + refused.length + ' refused — see the list.');
+      alert('Refused:\n\n' + refused.join('\n'));
+    } else {
+      toast(applied + ' change(s) saved. Undo is on the button up top.');
+    }
+    edBasket = [];
+    edLoadGrid();
+    edRenderBasket();
+    edBar();
+  }).catch(function (err) {
+    toast('Save failed: ' + err.message);
+    edBar();
+  });
+}
+
+// ---- Editor · batch mode ----
+function edSearch() {
+  var q = document.getElementById('ed_q').value;
+  var books = [];
+  Array.prototype.forEach.call(document.querySelectorAll('.ed-bk'), function (cb) {
+    if (cb.checked) books.push(cb.value);
+  });
+  if (!books.length) { toast('Pick at least one book to search.'); return; }
+  var el = document.getElementById('ed_hits');
+  el.innerHTML = '<div class="rnote">Searching…</div>';
+
+  jsonp({ action: 'gridSearch', token: token, q: q, books: books.join(',') }, 120000)
+    .then(function (r) {
+      if (!r || r.ok === false) {
+        el.innerHTML = '<div class="rnote">' + esc((r && r.error) || 'Search failed.') + '</div>';
+        return;
+      }
+      edHits = r;
+      edRenderHits();
+    }).catch(function (err) {
+      el.innerHTML = '<div class="rnote">' + esc(err.message) + '</div>';
+    });
+}
+
+function edInBasket(hit) {
+  for (var i = 0; i < edBasket.length; i++) {
+    var b = edBasket[i];
+    if (b.book === hit.book && b.tab === hit.tab && b.row === hit.row && b.col === hit.col) return i;
+  }
+  return -1;
+}
+
+function edRenderHits() {
+  var el = document.getElementById('ed_hits');
+  if (!edHits) { el.innerHTML = ''; return; }
+  if (!edHits.hits.length) {
+    el.innerHTML = '<div class="chart-card"><div class="rnote">Nothing matched.</div></div>';
+    return;
+  }
+  var note = edHits.hits.length + ' match' + (edHits.hits.length === 1 ? '' : 'es');
+  if (edHits.truncated) note += ' (capped — narrow the search)';
+
+  var h = '<div class="chart-card"><h3>Matches</h3><div class="rnote">' + esc(note) + '</div>' +
+    '<div class="tablewrap"><table><thead><tr><th></th><th>Book</th><th>Tab</th>' +
+    '<th>Row</th><th>Column</th><th>S/N</th><th>Cell</th></tr></thead><tbody>';
+  edHits.hits.forEach(function (hit, i) {
+    var checked = '';
+    if (edInBasket(hit) >= 0) checked = ' checked';
+    h += '<tr>' +
+      '<td><input type="checkbox" data-hit="' + i + '"' + checked + '></td>' +
+      '<td class="muted">' + esc(hit.book) + '</td>' +
+      '<td>' + esc(hit.tab) + '</td>' +
+      '<td class="muted">' + hit.row + '</td>' +
+      '<td class="muted">' + (esc(hit.header) || 'col ' + hit.col) + '</td>' +
+      '<td>' + esc(hit.sn) + '</td>' +
+      '<td>' + esc(hit.value) + '</td></tr>';
+  });
+  h += '</tbody></table></div></div>';
+  el.innerHTML = h;
+
+  Array.prototype.forEach.call(el.querySelectorAll('[data-hit]'), function (cb) {
+    cb.onchange = function () {
+      var hit = edHits.hits[Number(this.getAttribute('data-hit'))];
+      var at = edInBasket(hit);
+      if (this.checked && at < 0) edBasket.push(hit);
+      if (!this.checked && at >= 0) edBasket.splice(at, 1);
+      edRenderBasket();
+    };
+  });
+  edRenderBasket();
+}
+
+function edRenderBasket() {
+  var el = document.getElementById('ed_basket');
+  if (!el) return;
+  if (!edBasket.length) { el.innerHTML = ''; return; }
+
+  var books = {}, tabs = {};
+  edBasket.forEach(function (b) { books[b.book] = true; tabs[b.tab] = true; });
+
+  el.innerHTML = '<div class="chart-card"><h3>Selected</h3>' +
+    '<div class="rnote">' + edBasket.length + ' cell(s) across ' +
+      Object.keys(tabs).length + ' tab(s) in ' + Object.keys(books).length + ' book(s). ' +
+      'The change applies to the cell that matched, on every row you ticked.</div>' +
+    '<div class="controls" style="margin-bottom:0">' +
+      '<select id="ed_op">' +
+        '<option value="clear">Clear these cells</option>' +
+        '<option value="set">Replace these cells with…</option>' +
+      '</select>' +
+      '<input id="ed_opval" placeholder="new value" style="min-width:200px" disabled>' +
+      '<button class="btn primary" id="ed_apply">Stage ' + edBasket.length + ' change(s)</button>' +
+      '<button class="btn" id="ed_clearBasket">Clear selection</button>' +
+    '</div></div>';
+
+  document.getElementById('ed_op').onchange = function () {
+    document.getElementById('ed_opval').disabled = (this.value !== 'set');
+  };
+  document.getElementById('ed_clearBasket').onclick = function () {
+    edBasket = []; edRenderHits();
+  };
+  document.getElementById('ed_apply').onclick = function () {
+    var op = document.getElementById('ed_op').value;
+    var val = '';
+    if (op === 'set') {
+      val = document.getElementById('ed_opval').value;
+      if (!val) { toast('Type the value to write first.'); return; }
+    }
+    edBasket.forEach(function (b) {
+      edStage(b.book, b.tab, b.row, b.col, b.value, val);
+    });
+    toast(edBasket.length + ' change(s) staged — review and save at the bottom.');
+  };
+}
+
+// ---- Editor · undo ----
+function edUndoPrompt() {
+  jsonp({ action: 'gridBatches', token: token }, 60000).then(function (r) {
+    if (!r || r.ok === false) { toast('Could not read the edit log.'); return; }
+    if (!r.batches.length) { toast('Nothing has been saved from the editor yet.'); return; }
+    var lines = r.batches.map(function (b, i) {
+      return (i + 1) + ') ' + new Date(b.when).toLocaleString() + ' — ' +
+        b.count + ' cell(s) in ' + b.bookList;
+    });
+    var pick = prompt('Which save should be undone?\n\n' + lines.join('\n') +
+                      '\n\nType a number, or Cancel.');
+    if (!pick) return;
+    var idx = Number(pick) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= r.batches.length) { toast('No such save.'); return; }
+    var b = r.batches[idx];
+    if (!confirm('Put back ' + b.count + ' cell(s) from ' + new Date(b.when).toLocaleString() + '?')) return;
+
+    jsonp({ action: 'gridUndo', token: token, batch: b.batch }, 120000).then(function (u) {
+      if (!u || u.ok === false) { toast('Undo failed: ' + ((u && u.error) || '')); return; }
+      var msg = u.reverted + ' cell(s) put back.';
+      if (u.skipped) msg += ' ' + u.skipped + ' skipped — changed again since.';
+      toast(msg);
+      if (edData) edLoadGrid();
+    }).catch(function (err) { toast('Undo failed: ' + err.message); });
+  }).catch(function (err) { toast('Could not read the edit log: ' + err.message); });
 }
 
 function barChart(items) {
@@ -10825,9 +11379,257 @@ function renderReports() {
       '<div class="rnote">Test the monthly archive: copies current tickets into a new ' +
         '<b>[Month+YY]_Tickets</b> tab. This test does <b>not</b> clear the live sheet.</div>' +
       '<button class="btn" id="testArchiveBtn">⧉ Run test archive (no clear)</button>' +
-    '</div>';
+    '</div>' +
+    validationCard();
 
   document.getElementById('testArchiveBtn').onclick = testArchive;
+  wireValidation();
+}
+
+// ---- Data validation -------------------------------------------------------
+// Checks the two workbooks against each other and against the to-do list, and
+// lists every row that disagrees. The run reads both books end to end and takes
+// about a minute, so it is a button and never something that fires on load --
+// what the page shows on open is the last cached run.
+
+var validation = null;          // the report currently on screen
+var validationTried = false;    // have we asked the server for a cached one yet
+var validationRunning = false;
+
+var SEV_META = {
+  blocker: { icon: '⛔', label: 'Blockers', color: 'var(--red)' },
+  warn:    { icon: '⚠',  label: 'Warnings', color: 'var(--amber)' },
+  info:    { icon: 'ℹ',  label: 'Notices',  color: 'var(--gray)' }
+};
+var SEV_ORDER = ['blocker', 'warn', 'info'];
+
+function validationCard() {
+  var head =
+    '<div class="chart-card" style="margin-top:14px">' +
+      '<h3>Data validation</h3>' +
+      '<div class="rnote">Compares serials, carts and notes across the assignment roster, ' +
+        'the Start-of-Year check workbook, the ticket sheet and the to-do list. ' +
+        'A full run reads every tab in both books and takes about a minute.</div>' +
+      '<div class="controls" style="margin-bottom:0">' +
+        '<button class="btn primary" id="valRunBtn">✓ Validate data</button>' +
+        '<button class="btn" id="valCopyBtn">Copy</button>' +
+        '<button class="btn" id="valCsvBtn">CSV</button>' +
+        '<span class="rnote" id="valStamp" style="margin-left:4px"></span>' +
+      '</div>' +
+      '<div id="valBody"></div>' +
+    '</div>';
+  return head;
+}
+
+function wireValidation() {
+  var run = document.getElementById('valRunBtn');
+  if (!run) return;
+  run.onclick = runValidation;
+  document.getElementById('valCopyBtn').onclick = copyValidation;
+  document.getElementById('valCsvBtn').onclick = csvValidation;
+  renderValidation();
+
+  // Ask once for whatever the last run left in the cache. Costs nothing and
+  // never triggers the walk itself.
+  if (!validation && !validationTried) {
+    validationTried = true;
+    jsonp({ action: 'validateLast', token: token }).then(function (res) {
+      if (res && res.ok && !res.empty) { validation = res; renderValidation(); }
+    }).catch(function () { /* no cached run; the button is right there */ });
+  }
+}
+
+function runValidation() {
+  if (validationRunning) return;
+  validationRunning = true;
+  var btn = document.getElementById('valRunBtn');
+  btn.disabled = true;
+  btn.textContent = 'Checking both workbooks…';
+  document.getElementById('valBody').innerHTML =
+    '<div class="rnote" style="margin-top:12px">Reading every tab in both books. This takes about a minute.</div>';
+
+  jsonp({ action: 'validateData', token: token }, 300000).then(function (res) {
+    validationRunning = false;
+    btn.disabled = false; btn.textContent = '✓ Validate data';
+    if (!res || res.ok === false) {
+      toast('Validation failed: ' + ((res && res.error) || 'unknown error'));
+      document.getElementById('valBody').innerHTML = '';
+      return;
+    }
+    validation = res;
+    renderValidation();
+  }).catch(function (err) {
+    validationRunning = false;
+    btn.disabled = false; btn.textContent = '✓ Validate data';
+    document.getElementById('valBody').innerHTML = '';
+    toast('Validation failed: ' + err.message);
+  });
+}
+
+function renderValidation() {
+  var body = document.getElementById('valBody');
+  var stamp = document.getElementById('valStamp');
+  if (!body) return;
+  if (!validation) { body.innerHTML = ''; if (stamp) stamp.textContent = ''; return; }
+
+  var when = new Date(validation.runAt);
+  stamp.textContent = 'last run ' + when.toLocaleDateString() + ' ' +
+    when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) +
+    ' · ' + validation.seconds + 's';
+
+  var tiles = '<div class="vsum">';
+  for (var s = 0; s < SEV_ORDER.length; s++) {
+    var sev = SEV_ORDER[s], meta = SEV_META[sev];
+    tiles += '<div class="stat">' +
+      '<div class="n">' + (validation.counts[sev] || 0) + '</div>' +
+      '<div class="l"><span class="vdot" style="background:' + meta.color + '"></span>' +
+        meta.icon + ' ' + meta.label + '</div></div>';
+  }
+  var sc = validation.scanned || {};
+  tiles += '<div class="stat"><div class="n">' + (sc.checkSerials || 0) +
+    '</div><div class="l">Devices seen</div></div>';
+  tiles += '</div>';
+
+  if (!validation.findings.length) {
+    body.innerHTML = tiles + '<div class="vclean">✓ Nothing to fix — the books agree.</div>';
+    return;
+  }
+
+  // Findings arrive flat and already in severity order; group them for display
+  // so one bad import reads as one line item rather than fifty.
+  var groups = [], index = {};
+  validation.findings.forEach(function (f) {
+    var k = f.sev + '|' + f.group;
+    if (!index[k]) { index[k] = { sev: f.sev, group: f.group, rows: [] }; groups.push(index[k]); }
+    index[k].rows.push(f);
+  });
+  groups.sort(function (a, b) {
+    return SEV_ORDER.indexOf(a.sev) - SEV_ORDER.indexOf(b.sev);
+  });
+
+  var html = tiles;
+  groups.forEach(function (g) {
+    var meta = SEV_META[g.sev];
+    var open = '';
+    if (g.sev === 'blocker') open = ' open';
+    html += '<details class="vgroup"' + open + '>' +
+      '<summary><span class="vdot" style="background:' + meta.color + '"></span>' +
+        meta.icon + ' ' + esc(g.group) +
+        '<span class="gn">' + g.rows.length + '</span></summary>';
+    g.rows.forEach(function (f) {
+      var where = '';
+      if (f.tab) {
+        where = f.tab;
+        if (f.row) where += ' · row ' + f.row;
+      }
+      var fix = '';
+      if (f.fix === 'serials') {
+        fix = '<button class="btn" data-fix="serials">Fix all</button>';
+      } else if (f.fix === 'resync') {
+        fix = '<button class="btn" data-fix="resync">Re-sync notes</button>';
+      }
+      html += '<div class="vrow">' +
+        '<span class="t">' + esc(f.text) + '</span>' +
+        '<span class="where">' + esc(where) + '</span>' + fix +
+        '<button class="btn" data-ignore="' + esc(f.key) + '">Ignore</button>' +
+        '</div>';
+    });
+    html += '</details>';
+  });
+  body.innerHTML = html;
+
+  Array.prototype.forEach.call(body.querySelectorAll('[data-ignore]'), function (b) {
+    b.onclick = function () { ignoreFinding(this.getAttribute('data-ignore')); };
+  });
+  Array.prototype.forEach.call(body.querySelectorAll('[data-fix="serials"]'), function (b) {
+    b.onclick = fixTicketSerials;
+  });
+  Array.prototype.forEach.call(body.querySelectorAll('[data-fix="resync"]'), function (b) {
+    b.onclick = resyncLoanerNotes;
+  });
+}
+
+// Rewrites the device notes from the loaner ledger. The ledger is the record,
+// so this direction is always the safe one -- it can restore a note somebody
+// deleted in Sheets, and it never edits the ledger itself.
+function resyncLoanerNotes() {
+  if (!confirm('Rewrite the loaner notes on every device from the Loaners tab?')) return;
+  jsonp({ action: 'loanerResync', token: token }, 120000).then(function (res) {
+    if (!res || res.ok === false) { toast('Re-sync failed: ' + ((res && res.error) || '')); return; }
+    toast(res.checked + ' loan(s) checked · ' + res.written + ' note(s) written · ' +
+          res.cleared + ' cleared. Run the validator again to confirm.');
+  }).catch(function (err) { toast('Re-sync failed: ' + err.message); });
+}
+
+// Waving a finding off stores it on the script, so it stays quiet on later runs.
+// A NEW instance of the same kind still reports -- the key is the exact text.
+function ignoreFinding(key) {
+  jsonp({ action: 'validateIgnore', token: token, key: key }).then(function (res) {
+    if (!res || res.ok === false) { toast('Could not save that.'); return; }
+    validation.findings = validation.findings.filter(function (f) { return f.key !== key; });
+    validation.counts = { blocker: 0, warn: 0, info: 0 };
+    validation.findings.forEach(function (f) { validation.counts[f.sev]++; });
+    renderValidation();
+  }).catch(function (err) { toast('Could not save that: ' + err.message); });
+}
+
+function fixTicketSerials() {
+  if (!confirm('Rewrite the stored serial on every ticket row that holds a URL or a label?')) return;
+  jsonp({ action: 'validateFixSerials', token: token }, 120000).then(function (res) {
+    if (!res || res.ok === false) { toast('Fix failed: ' + ((res && res.error) || '')); return; }
+    toast(res.fixed + ' serial(s) rewritten — run the validator again to confirm.');
+  }).catch(function (err) { toast('Fix failed: ' + err.message); });
+}
+
+function validationLines() {
+  var out = [];
+  SEV_ORDER.forEach(function (sev) {
+    validation.findings.forEach(function (f) {
+      if (f.sev !== sev) return;
+      var where = '';
+      if (f.tab) {
+        where = f.tab;
+        if (f.row) where += ' row ' + f.row;
+      }
+      out.push({ sev: sev, group: f.group, text: f.text, where: where });
+    });
+  });
+  return out;
+}
+
+function copyValidation() {
+  if (!validation) { toast('Run the validator first.'); return; }
+  var lines = ['CPA IT data validation — ' + new Date(validation.runAt).toLocaleString(), ''];
+  var last = '';
+  validationLines().forEach(function (r) {
+    var head = SEV_META[r.sev].label + ' — ' + r.group;
+    if (head !== last) { lines.push(''); lines.push(head); last = head; }
+    lines.push('    ' + r.text);
+  });
+  var text = lines.join('\n');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () { toast('Report copied.'); })
+      .catch(function () { toast('Could not copy.'); });
+  } else {
+    toast('Copying is not available in this browser.');
+  }
+}
+
+function csvValidation() {
+  if (!validation) { toast('Run the validator first.'); return; }
+  function cell(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
+  var rows = ['Severity,Group,Detail,Where'];
+  validationLines().forEach(function (r) {
+    rows.push([cell(r.sev), cell(r.group), cell(r.text), cell(r.where)].join(','));
+  });
+  var blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'cpa-validation-' + new Date().toISOString().slice(0, 10) + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
 }
 
 // ---- Device lookup ----
@@ -10919,7 +11721,289 @@ function renderLookup(res) {
       }).join('') + '</tbody></table></div>';
   }
   h += '</div>';
+  h += loanerPanel(res);
   el.innerHTML = h;
+  wireLoanerForm(res);
+}
+
+// ---- Loaners ---------------------------------------------------------------
+// The Loaners tab in the ticket book is the record. Everything here reads from
+// it and writes to it; the notes that appear on the two devices are a mirror the
+// script keeps in step, and "Re-sync notes" in Reports rebuilds them from here.
+//
+// A loan that has been out this long stops being neutral on the list. Change
+// these two numbers and nothing else needs touching.
+var LOAN_WARN_DAYS = 14;
+var LOAN_LATE_DAYS = 30;
+
+var loaners = null;             // { loans: [...], openCount: n }
+var loanerOpts = null;          // past values behind the type-ahead fields
+var loanersLoading = false;
+var loanerShow = 'open';        // open | returned | all
+var loanerQuery = '';
+
+function loadLoaners(force) {
+  if (loanersLoading) return;
+  if (loaners && !force) { renderLoaners(); return; }
+  loanersLoading = true;
+  Promise.all([
+    jsonp({ action: 'loanerList', token: token }, 60000),
+    jsonp({ action: 'loanerOptions', token: token }, 60000)
+  ]).then(function (res) {
+    loanersLoading = false;
+    if (res[0] && res[0].ok) loaners = res[0];
+    if (res[1] && res[1].ok) loanerOpts = res[1];
+    renderLoaners();
+  }).catch(function () {
+    loanersLoading = false;
+    var el = document.getElementById('lu_loaners');
+    if (el) el.innerHTML = '<div class="chart-card"><h3>Loaners</h3>' +
+      '<div class="rnote">Could not read the loaner ledger.</div></div>';
+  });
+}
+
+function daysBar(days) {
+  var n = Number(days);
+  if (isNaN(n)) return '';
+  var pct = Math.round(Math.min(n, LOAN_LATE_DAYS) / LOAN_LATE_DAYS * 100);
+  var color = '#2f6fe0';
+  if (n >= LOAN_LATE_DAYS) color = 'var(--red)';
+  else if (n >= LOAN_WARN_DAYS) color = 'var(--amber)';
+  return '<div class="daysbar"><div class="track"><div class="fill" style="width:' + pct +
+    '%;background:' + color + '"></div></div><div class="num">' + n + '</div></div>';
+}
+
+function loanMatches(L) {
+  if (loanerShow === 'open' && !L.open) return false;
+  if (loanerShow === 'returned' && L.open) return false;
+  if (!loanerQuery) return true;
+  var hay = [L.inopSn, L.inopCart, L.loanerSn, L.source, L.student, L.note].join(' ').toLowerCase();
+  return hay.indexOf(loanerQuery.toLowerCase()) >= 0;
+}
+
+function renderLoaners() {
+  var el = document.getElementById('lu_loaners');
+  if (!el) return;
+  if (!loaners) { el.innerHTML = ''; return; }
+
+  var all = loaners.loans;
+  var openCount = 0, returned = 0, longest = 0;
+  all.forEach(function (L) {
+    if (L.open) {
+      openCount++;
+      if (Number(L.days) > longest) longest = Number(L.days);
+    } else {
+      returned++;
+    }
+  });
+
+  var h = '<div class="chart-card"><h3>Loaners</h3>' +
+    '<div class="vsum">' +
+      '<div class="stat"><div class="n">' + openCount + '</div><div class="l">Out now</div></div>' +
+      '<div class="stat"><div class="n">' + returned + '</div><div class="l">Returned</div></div>' +
+      '<div class="stat"><div class="n">' + longest + '</div><div class="l">Longest out (days)</div></div>' +
+    '</div>' +
+    '<div class="controls" style="margin-bottom:8px">' +
+      '<input type="search" id="lo_q" placeholder="serial, student, cart, source…" ' +
+        'value="' + esc(loanerQuery) + '" style="min-width:240px">' +
+      '<select id="lo_show">' +
+        '<option value="open">Out now</option>' +
+        '<option value="returned">Returned</option>' +
+        '<option value="all">All</option>' +
+      '</select>' +
+      '<button class="btn" id="lo_reload">⟳ Reload</button>' +
+    '</div>';
+
+  var rows = all.filter(loanMatches);
+  if (!rows.length) {
+    h += '<div class="rnote">No loans match.</div>';
+  } else {
+    h += '<div class="tablewrap"><table><thead><tr>' +
+      '<th>Out</th><th>Broken S/N</th><th>Cart</th><th>Loaner S/N</th><th>Source</th>' +
+      '<th>Student</th><th>Days</th><th></th></tr></thead><tbody>' +
+      rows.map(function (L) {
+        var action = '';
+        if (L.open) {
+          action = '<button class="btn" data-return="' + L.row + '">Return</button>';
+        } else {
+          action = '<span class="muted">back ' + esc(fmtDate(L.dateIn)) + '</span>';
+        }
+        return '<tr>' +
+          '<td class="muted">' + esc(fmtDate(L.dateOut)) + '</td>' +
+          '<td>' + esc(L.inopSn) + '</td>' +
+          '<td class="muted">' + (esc(L.inopCart) || '—') + '</td>' +
+          '<td>' + esc(L.loanerSn) + '</td>' +
+          '<td class="muted">' + (esc(L.source) || '—') + '</td>' +
+          '<td>' + (esc(L.student) || '—') + '</td>' +
+          '<td>' + daysBar(L.days) + '</td>' +
+          '<td>' + action + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+  h += '</div>';
+  el.innerHTML = h;
+
+  document.getElementById('lo_show').value = loanerShow;
+  document.getElementById('lo_show').onchange = function () {
+    loanerShow = this.value; renderLoaners();
+  };
+  document.getElementById('lo_reload').onclick = function () { loadLoaners(true); };
+  var q = document.getElementById('lo_q');
+  q.oninput = function () {
+    loanerQuery = this.value;
+    var pos = this.selectionStart;
+    renderLoaners();
+    var again = document.getElementById('lo_q');
+    again.focus();
+    again.setSelectionRange(pos, pos);
+  };
+  Array.prototype.forEach.call(el.querySelectorAll('[data-return]'), function (b) {
+    b.onclick = function () { returnLoaner(this.getAttribute('data-return')); };
+  });
+}
+
+// The panel under a looked-up device: whatever loan it is already part of, and
+// the form to start a new one.
+function loanerPanel(res) {
+  var sn = res.sn;
+  var open = null;
+  if (loaners) {
+    loaners.loans.forEach(function (L) {
+      if (!L.open) return;
+      if (L.inopSn.toUpperCase() === sn.toUpperCase()) open = L;
+      if (L.loanerSn.toUpperCase() === sn.toUpperCase()) open = L;
+    });
+  }
+
+  var h = '<div class="chart-card" style="margin-top:14px"><h3>Loaner</h3>';
+  if (open) {
+    var role = 'This device is out as a loaner';
+    if (open.inopSn.toUpperCase() === sn.toUpperCase()) {
+      role = 'This device is inop — loaner ' + esc(open.loanerSn) + ' is out in its place';
+    }
+    h += '<div class="lo-open"><span>' + role + ', since ' + esc(fmtDate(open.dateOut)) + '.</span>' +
+      '<span style="flex:1"></span>' +
+      '<button class="btn" data-return="' + open.row + '">Return</button></div>';
+  }
+
+  // What the roster says, offered as a hint. The field is still free text.
+  var cartHint = '';
+  if (res.assignments && res.assignments.length) {
+    cartHint = res.assignments[0].cart;
+    if (res.assignments[0].chromebookNo) cartHint += ' #' + res.assignments[0].chromebookNo;
+  }
+  var studentHint = '';
+  if (res.assignments && res.assignments.length && res.assignments[0].students &&
+      res.assignments[0].students.length) {
+    studentHint = String(res.assignments[0].students[0]).replace(/\s*\([^)]*\)\s*$/, '');
+  }
+
+  h += '<button class="btn primary" id="lo_toggle">Log a loaner</button>' +
+    '<div id="lo_form" class="hidden" style="margin-top:14px">' +
+      '<div class="lo-grid">' +
+        loanerField('lo_inopCart', 'Inop cart', cartHint, 'lo_carts', 'detected: ' + (cartHint || 'not on any cart')) +
+        loanerField('lo_loanerSn', 'Loaner S/N', '', '', 'scan or type the serial you are handing out') +
+        loanerField('lo_source', 'Loaner source', '', 'lo_sources', 'where it came from — your words') +
+        loanerField('lo_student', 'Student', studentHint, 'lo_students', '') +
+      '</div>' +
+      loanerField('lo_note', 'What is wrong with it', '', '', '') +
+      '<div class="rnote">Writes one row to the <b>Loaners</b> tab and a note on each device.</div>' +
+      '<div class="controls" style="margin-top:8px;margin-bottom:0">' +
+        '<button class="btn primary" id="lo_submit">Log it</button>' +
+        '<button class="btn" id="lo_cancel">Cancel</button>' +
+      '</div>' +
+      loanerDatalists() +
+    '</div>';
+  h += '</div>';
+  return h;
+}
+
+// One combo field: a plain text input with a datalist behind it. Chrome shows
+// the whole list on click and narrows it as you type, and anything new you type
+// is still accepted -- which is the behaviour asked for.
+function loanerField(id, label, value, listId, hint) {
+  var list = '';
+  if (listId) list = ' list="' + listId + '"';
+  var hintHtml = '';
+  if (hint) hintHtml = '<span class="lo-hint">' + esc(hint) + '</span>';
+  return '<div class="lo-field"><label for="' + id + '">' + esc(label) + '</label>' +
+    '<input id="' + id + '"' + list + ' value="' + esc(value) + '" autocomplete="off">' +
+    hintHtml + '</div>';
+}
+
+function loanerDatalists() {
+  function list(id, items) {
+    var opts = (items || []).map(function (v) { return '<option value="' + esc(v) + '">'; }).join('');
+    return '<datalist id="' + id + '">' + opts + '</datalist>';
+  }
+  var o = loanerOpts || { carts: [], sources: [], students: [] };
+  return list('lo_carts', o.carts) + list('lo_sources', o.sources) + list('lo_students', o.students);
+}
+
+function wireLoanerForm(res) {
+  var toggle = document.getElementById('lo_toggle');
+  if (!toggle) return;
+  toggle.onclick = function () {
+    var f = document.getElementById('lo_form');
+    f.classList.toggle('hidden');
+    if (!f.classList.contains('hidden')) document.getElementById('lo_loanerSn').focus();
+  };
+  document.getElementById('lo_cancel').onclick = function () {
+    document.getElementById('lo_form').classList.add('hidden');
+  };
+  document.getElementById('lo_submit').onclick = function () { submitLoaner(res.sn); };
+  Array.prototype.forEach.call(document.querySelectorAll('#lu_results [data-return]'), function (b) {
+    b.onclick = function () { returnLoaner(this.getAttribute('data-return')); };
+  });
+}
+
+function submitLoaner(inopSn, replace) {
+  var btn = document.getElementById('lo_submit');
+  var params = {
+    action: 'loanerIssue', token: token,
+    inopSn: inopSn,
+    loanerSn: document.getElementById('lo_loanerSn').value,
+    inopCart: document.getElementById('lo_inopCart').value,
+    source: document.getElementById('lo_source').value,
+    student: document.getElementById('lo_student').value,
+    note: document.getElementById('lo_note').value
+  };
+  if (replace) params.replace = '1';
+  btn.disabled = true; btn.textContent = 'Logging…';
+
+  jsonp(params, 60000).then(function (r) {
+    btn.disabled = false; btn.textContent = 'Log it';
+    if (!r || r.ok === false) {
+      // The device already has a loan out: offer the swap rather than opening a
+      // second one behind your back.
+      if (r && r.needsReplace) {
+        if (confirm(r.error + '\n\nReturn that one and issue this instead?')) {
+          submitLoaner(inopSn, true);
+        }
+        return;
+      }
+      toast((r && r.error) || 'Could not log that loaner.');
+      return;
+    }
+    var msg = 'Logged on Loaners row ' + r.row + '.';
+    if (r.inopNote && r.inopNote.skipped) msg += ' Broken device note skipped — ' + r.inopNote.skipped + '.';
+    if (r.loanerNote && r.loanerNote.skipped) msg += ' Loaner note skipped — ' + r.loanerNote.skipped + '.';
+    toast(msg);
+    document.getElementById('lo_form').classList.add('hidden');
+    loadLoaners(true);
+    doLookup(inopSn);
+  }).catch(function (err) {
+    btn.disabled = false; btn.textContent = 'Log it';
+    toast('Could not log that loaner: ' + err.message);
+  });
+}
+
+function returnLoaner(row) {
+  if (!confirm('Mark this loan returned and clear both device notes?')) return;
+  jsonp({ action: 'loanerReturn', token: token, row: row }, 60000).then(function (r) {
+    if (!r || r.ok === false) { toast((r && r.error) || 'Return failed.'); return; }
+    toast('Returned — ' + r.cleared + ' note(s) cleared.');
+    loadLoaners(true);
+  }).catch(function (err) { toast('Return failed: ' + err.message); });
 }
 
 // Factory QR labels encode a support URL rather than the bare serial. A new
