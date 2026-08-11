@@ -11217,7 +11217,9 @@ function edRenderHits() {
   if (edHits.truncated) note += ' (capped — narrow the search)';
 
   var h = '<div class="chart-card"><h3>Matches</h3><div class="rnote">' + esc(note) + '</div>' +
-    '<div class="tablewrap"><table><thead><tr><th></th><th>Book</th><th>Tab</th>' +
+    '<div class="tablewrap"><table><thead><tr>' +
+    '<th><input type="checkbox" id="ed_all" title="Select every match"></th>' +
+    '<th>Book</th><th>Tab</th>' +
     '<th>Row</th><th>Column</th><th>S/N</th><th>Cell</th></tr></thead><tbody>';
   edHits.hits.forEach(function (hit, i) {
     var checked = '';
@@ -11243,6 +11245,24 @@ function edRenderHits() {
       edRenderBasket();
     };
   });
+
+  // Select-all across the whole result set. Ticking sixty boxes by hand is how
+  // you end up ticking fifty-nine.
+  var all = document.getElementById('ed_all');
+  if (all) {
+    all.onchange = function () {
+      var on = this.checked;
+      edHits.hits.forEach(function (hit) {
+        var at = edInBasket(hit);
+        if (on && at < 0) edBasket.push(hit);
+        if (!on && at >= 0) edBasket.splice(at, 1);
+      });
+      Array.prototype.forEach.call(el.querySelectorAll('[data-hit]'), function (cb) {
+        cb.checked = on;
+      });
+      edRenderBasket();
+    };
+  }
   edRenderBasket();
 }
 
