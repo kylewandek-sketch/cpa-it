@@ -11566,9 +11566,13 @@ function resyncLoanerNotes() {
 function ignoreFinding(key) {
   jsonp({ action: 'validateIgnore', token: token, key: key }).then(function (res) {
     if (!res || res.ok === false) { toast('Could not save that.'); return; }
+    // Decrement rather than recount: the counts are the real totals from the
+    // server, and the findings list is capped, so recounting it would quietly
+    // replace the true number with the displayed one.
+    validation.findings.forEach(function (f) {
+      if (f.key === key && validation.counts[f.sev]) validation.counts[f.sev]--;
+    });
     validation.findings = validation.findings.filter(function (f) { return f.key !== key; });
-    validation.counts = { blocker: 0, warn: 0, info: 0 };
-    validation.findings.forEach(function (f) { validation.counts[f.sev]++; });
     renderValidation();
   }).catch(function (err) { toast('Could not save that: ' + err.message); });
 }
