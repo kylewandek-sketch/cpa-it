@@ -11818,6 +11818,8 @@ function daysBar(days) {
 
 function loanMatches(L) {
   if (loanerShow === 'loans' && (!L.open || !L.inopSn)) return false;
+  // The other side of the same test: a device that lives in another cart now.
+  if (loanerShow === 'moves' && (!L.open || L.inopSn)) return false;
   if (loanerShow === 'open' && !L.open) return false;
   if (loanerShow === 'returned' && L.open) return false;
   if (!loanerQuery) return true;
@@ -11862,6 +11864,7 @@ function renderLoaners() {
         'value="' + esc(loanerQuery) + '" style="min-width:240px">' +
       '<select id="lo_show">' +
         '<option value="loans">Loans only</option>' +
+        '<option value="moves">Relocations</option>' +
         '<option value="open">Everything out</option>' +
         '<option value="returned">Returned</option>' +
         '<option value="all">All</option>' +
