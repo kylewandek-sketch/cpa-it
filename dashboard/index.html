@@ -11556,8 +11556,14 @@ function resyncLoanerNotes() {
   if (!confirm('Rewrite the loaner notes on every device from the Loaners tab?')) return;
   jsonp({ action: 'loanerResync', token: token }, 120000).then(function (res) {
     if (!res || res.ok === false) { toast('Re-sync failed: ' + ((res && res.error) || '')); return; }
-    toast(res.checked + ' loan(s) checked · ' + res.written + ' note(s) written · ' +
-          res.cleared + ' cleared. Run the validator again to confirm.');
+    var msg = res.checked + ' loan(s) checked · ' + res.written + ' note(s) written · ' +
+              res.cleared + ' cleared.';
+    if (res.skipped) msg += ' ' + res.skipped + ' left alone (cell held typed text).';
+    toast(msg);
+    if (res.skippedList && res.skippedList.length) {
+      alert('Left alone rather than overwritten:\n\n' + res.skippedList.join('\n'));
+    }
+    loadLoaners(true);
   }).catch(function (err) { toast('Re-sync failed: ' + err.message); });
 }
 
@@ -11816,6 +11822,8 @@ function renderLoaners() {
         '<option value="all">All</option>' +
       '</select>' +
       '<button class="btn" id="lo_reload">⟳ Reload</button>' +
+      '<button class="btn" id="lo_resync" title="Rewrite the notes on every device from this ledger">' +
+        '⇄ Re-sync notes</button>' +
     '</div>';
 
   var rows = all.filter(loanMatches);
@@ -11851,6 +11859,9 @@ function renderLoaners() {
     loanerShow = this.value; renderLoaners();
   };
   document.getElementById('lo_reload').onclick = function () { loadLoaners(true); };
+  // Rows typed straight into the Loaners tab never wrote a device note -- only
+  // the form does that. This is the button that fills them in afterwards.
+  document.getElementById('lo_resync').onclick = resyncLoanerNotes;
   var q = document.getElementById('lo_q');
   q.oninput = function () {
     loanerQuery = this.value;
