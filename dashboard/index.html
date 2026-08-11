@@ -11566,18 +11566,29 @@ function renderValidation() {
 // so this direction is always the safe one -- it can restore a note somebody
 // deleted in Sheets, and it never edits the ledger itself.
 function resyncLoanerNotes() {
-  if (!confirm('Rewrite the loaner notes on every device from the Loaners tab?')) return;
+  if (!confirm('Rewrite the device notes for every open loan, from the Loaners tab?')) return;
+  loanerMsg = 'Re-syncing…';
+  renderLoaners();
   jsonp({ action: 'loanerResync', token: token }, 120000).then(function (res) {
-    if (!res || res.ok === false) { toast('Re-sync failed: ' + ((res && res.error) || '')); return; }
-    var msg = res.checked + ' loan(s) checked · ' + res.written + ' note(s) written · ' +
-              res.cleared + ' cleared.';
-    if (res.skipped) msg += ' ' + res.skipped + ' left alone (cell held typed text).';
-    toast(msg);
+    if (!res || res.ok === false) {
+      loanerMsg = 'Re-sync failed: ' + ((res && res.error) || 'unknown error');
+      renderLoaners();
+      return;
+    }
+    // Kept on the panel rather than in a toast. A toast fades in a few seconds,
+    // and this is the one message worth reading -- it is how you find out a note
+    // did not get written.
+    loanerMsg = '✓ Re-sync: ' + res.checked + ' loan(s) checked · ' + res.written +
+                ' note(s) written · ' + res.cleared + ' cleared.';
+    if (res.skipped) loanerMsg += ' ' + res.skipped + ' left alone — the cell held typed text.';
     if (res.skippedList && res.skippedList.length) {
       alert('Left alone rather than overwritten:\n\n' + res.skippedList.join('\n'));
     }
-    loadLoaners(true);
-  }).catch(function (err) { toast('Re-sync failed: ' + err.message); });
+    loadLoaners(true);        // re-renders, keeping loanerMsg on screen
+  }).catch(function (err) {
+    loanerMsg = 'Re-sync failed: ' + err.message;
+    renderLoaners();
+  });
 }
 
 // Waving a finding off stores it on the script, so it stays quiet on later runs.
@@ -11762,8 +11773,17 @@ var LOAN_LATE_DAYS = 30;
 var loaners = null;             // { loans: [...], openCount: n }
 var loanerOpts = null;          // past values behind the type-ahead fields
 var loanersLoading = false;
-var loanerShow = 'open';        // open | returned | all
+// loans | open | returned | all.
+//
+// Defaults to "loans" because the ledger holds two different kinds of row and
+// only one of them is a loan. A row with an Inop S/N has a broken device behind
+// it -- something went wrong, a substitute went out, and it is coming back. A
+// row without one is a relocation: a device that simply lives in another cart
+// now. There are ~60 of those and 4 loans, so showing everything by default
+// buries the rows that need attention.
+var loanerShow = 'loans';
 var loanerQuery = '';
+var loanerMsg = '';             // last Re-sync result, kept on screen
 
 function loadLoaners(force) {
   if (loanersLoading) return;
@@ -11797,6 +11817,7 @@ function daysBar(days) {
 }
 
 function loanMatches(L) {
+  if (loanerShow === 'loans' && (!L.open || !L.inopSn)) return false;
   if (loanerShow === 'open' && !L.open) return false;
   if (loanerShow === 'returned' && L.open) return false;
   if (!loanerQuery) return true;
@@ -11810,27 +11831,38 @@ function renderLoaners() {
   if (!loaners) { el.innerHTML = ''; return; }
 
   var all = loaners.loans;
-  var openCount = 0, returned = 0, longest = 0;
+  var loansOut = 0, moves = 0, returned = 0, longest = 0;
   all.forEach(function (L) {
-    if (L.open) {
-      openCount++;
+    if (!L.open) { returned++; return; }
+    if (L.inopSn) {
+      loansOut++;
       if (Number(L.days) > longest) longest = Number(L.days);
     } else {
-      returned++;
+      moves++;
     }
   });
 
+  var msg = '';
+  if (loanerMsg) {
+    msg = '<div class="rnote" style="color:var(--green);font-weight:600">' + esc(loanerMsg) + '</div>';
+  }
+
   var h = '<div class="chart-card"><h3>Loaners</h3>' +
     '<div class="vsum">' +
-      '<div class="stat"><div class="n">' + openCount + '</div><div class="l">Out now</div></div>' +
+      '<div class="stat"><div class="n">' + loansOut + '</div><div class="l">Loans out</div></div>' +
+      '<div class="stat"><div class="n">' + moves + '</div><div class="l">Relocations</div></div>' +
       '<div class="stat"><div class="n">' + returned + '</div><div class="l">Returned</div></div>' +
-      '<div class="stat"><div class="n">' + longest + '</div><div class="l">Longest out (days)</div></div>' +
+      '<div class="stat"><div class="n">' + longest + '</div><div class="l">Longest loan (days)</div></div>' +
     '</div>' +
+    '<div class="rnote">A <b>loan</b> has a broken device behind it and is coming back. ' +
+      'A <b>relocation</b> is a device that simply lives in another cart now — no fault, ' +
+      'nothing to return.</div>' + msg +
     '<div class="controls" style="margin-bottom:8px">' +
       '<input type="search" id="lo_q" placeholder="serial, student, cart, source…" ' +
         'value="' + esc(loanerQuery) + '" style="min-width:240px">' +
       '<select id="lo_show">' +
-        '<option value="open">Out now</option>' +
+        '<option value="loans">Loans only</option>' +
+        '<option value="open">Everything out</option>' +
         '<option value="returned">Returned</option>' +
         '<option value="all">All</option>' +
       '</select>' +
@@ -11848,11 +11880,17 @@ function renderLoaners() {
       '<th>Student</th><th>Days</th><th></th></tr></thead><tbody>' +
       rows.map(function (L) {
         var action = '';
-        if (L.open) {
+        if (!L.open) {
+          action = '<span class="muted">back ' + esc(fmtDate(L.dateIn)) + '</span>';
+        } else if (L.inopSn) {
           action = '<button class="btn" data-return="' + L.row + '">Return</button>';
         } else {
-          action = '<span class="muted">back ' + esc(fmtDate(L.dateIn)) + '</span>';
+          // A relocation has nothing to hand back, so no Return button and no
+          // days count -- the device lives there now.
+          action = '<span class="muted">moved</span>';
         }
+        var days = daysBar(L.days);
+        if (!L.inopSn) days = '<span class="muted">—</span>';
         return '<tr>' +
           '<td class="muted">' + esc(fmtDate(L.dateOut)) + '</td>' +
           '<td>' + esc(L.inopSn) + '</td>' +
@@ -11860,7 +11898,7 @@ function renderLoaners() {
           '<td>' + esc(L.loanerSn) + '</td>' +
           '<td class="muted">' + (esc(L.source) || '—') + '</td>' +
           '<td>' + (esc(L.student) || '—') + '</td>' +
-          '<td>' + daysBar(L.days) + '</td>' +
+          '<td>' + days + '</td>' +
           '<td>' + action + '</td></tr>';
       }).join('') + '</tbody></table></div>';
   }
