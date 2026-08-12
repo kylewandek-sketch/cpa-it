@@ -19,9 +19,11 @@
     --line: #dfe4ee;
     --green: #0a8f4a;
     --red: #d13438;
+    --amber: #a86400;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --page:#0f1420; --card:#171d2b; --ink:#e8ecf4; --muted:#9aa6bd; --line:#2a3244; }
+    :root { --page:#0f1420; --card:#171d2b; --ink:#e8ecf4; --muted:#9aa6bd; --line:#2a3244;
+            --amber:#e0a53a; }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
@@ -61,6 +63,9 @@
   .status { margin: 10px 0 2px; font-size: 13.5px; min-height: 20px; color: var(--muted); }
   .status.ok { color: var(--green); font-weight: 600; }
   .status.err { color: var(--red); font-weight: 600; }
+  /* Read the code, but the books do not have it: not a failure, not a clean
+     capture either. The teacher can still file the ticket. */
+  .status.warn { color: var(--amber); font-weight: 600; }
 
   button { font-size: 14px; padding: 9px 14px; border-radius: 9px; border: 1px solid var(--line);
            background: var(--card); color: var(--ink); cursor: pointer; margin: 0 6px 6px 0;
@@ -140,21 +145,27 @@
           <input type="text" id="fld_sn" name="sn" required placeholder="Scan the QR code, or type it">
         </div>
 
-        <!-- Not a Chromebook or iPad. The S/N box is hidden, and the teacher and
-             room are taken from "Your name" and "Room #" below -- both of which
-             are required either way -- then joined into the "Name · Rm N" value
-             the S/N column has always held for these tickets. Nothing downstream
-             has a device to attach to, so the serial checks are skipped, no
-             roster note is written, and no to-do is created -- the To-Do page is
-             the history of the Chromebooks and iPads, and a projector does not
-             belong in it. -->
+        <!-- No serial. Two ways to land here: it is not a Chromebook or iPad at
+             all, or it is one and the label will not read. Either way the S/N
+             box is hidden and the teacher and room are taken from "Your name"
+             and "Room #" below -- both required anyway -- then joined into the
+             "Name · Rm N" value the S/N column has always held for these
+             tickets.
+
+             The consequence is the same for both: nothing downstream has a
+             device to attach to, so the serial checks are skipped, no roster
+             note is written, and no to-do is created. That is right for a
+             projector. For a Chromebook whose sticker is unreadable it means the
+             ticket will not show up in that device's history -- the trade Kyle
+             chose on 2026-08-12, on the grounds that a ticket nobody can file is
+             worse than one filed without a serial. -->
         <label class="checkline" for="fld_notdevice">
           <input type="checkbox" id="fld_notdevice" name="notdevice">
-          <span>This isn't about a Chromebook or iPad</span>
+          <span>No S/N — it isn't a Chromebook or iPad, or the label won't scan</span>
         </label>
         <div id="notdevice_hint" class="hint" style="display:none">
-          Say what the equipment is in “Describe the problem”. Your name and room
-          number below tell us where to find it.
+          Say what the equipment is, or which Chromebook it is, in “Describe the
+          problem”. Your name and room number below tell us where to find it.
         </div>
 
         <div class="row">
@@ -10357,9 +10368,14 @@ function beep() {
 // -- the serial is the sn parameter, and mtm is the model, not a serial. Our
 // own printed labels encode the bare serial and pass through unchanged.
 // apps-script.gs has the same logic in serialFromScan_; keep them in step.
-function serialFromScan(raw) {
+// Every code a scan could plausibly be, longest first. A label often carries
+// two -- Acer prints a short SNID beside the serial, Lenovo an MTM -- and length
+// alone cannot always tell which is the device. The books can: whoever calls
+// this may check the candidates against the S/N column and use the one that is
+// really there, falling back to the first (longest) when the books cannot say.
+function serialCandidates(raw) {
   var s = String(raw == null ? '' : raw).trim();
-  if (!s) return '';
+  if (!s) return [];
 
   // Reads like a device serial on its own?
   function bareSerial(v) {
@@ -10369,9 +10385,24 @@ function serialFromScan(raw) {
     return /[A-Za-z]/.test(t) && /[0-9]/.test(t);
   }
 
+  // Longest first, duplicates dropped. Sort is stable, so codes of equal length
+  // stay in the order they were read.
+  function byLongest(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var v = String(list[i] == null ? '' : list[i]).trim();
+      if (v && out.indexOf(v) < 0) out.push(v);
+    }
+    out.sort(function (a, b) { return b.length - a.length; });
+    return out;
+  }
+
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
-    // A URL. Take the first query parameter that names a serial, so sn wins
-    // over mtm on a Lenovo link.
+    // A URL. Collect every query parameter that NAMES a serial. Selecting by
+    // name first is what keeps mtm out: it is the model, and on a Lenovo link it
+    // is longer than the serial beside it, so comparing lengths across the whole
+    // query string would pick the wrong one.
+    var found = [];
     var q = s.indexOf('?');
     if (q >= 0) {
       var parts = s.slice(q + 1).split(/[&;]/);
@@ -10387,35 +10418,157 @@ function serialFromScan(raw) {
         } catch (e) {
           val = parts[i].slice(eq + 1).trim();
         }
-        if (val) return val;
+        if (val) found.push(val);
       }
     }
+    if (found.length) return byLongest(found);
+
     // No serial parameter -- some makers put it in the last path segment.
     var path = s.split(/[?#]/)[0].replace(/\/+$/, '');
     var seg = path.slice(path.lastIndexOf('/') + 1);
-    if (bareSerial(seg)) return seg;
-    return s;             // nothing recognisable; keep what we read rather than
+    if (bareSerial(seg)) return [seg];
+    return [s];           // nothing recognisable; keep what we read rather than
                           // mangle it into something wrong
   }
 
-  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value.
-  var m = s.match(/\b(?:s\/n|sn|serial(?:\s*(?:no|number))?|service\s*tag)\s*[:=]\s*([A-Za-z0-9-]+)/i);
-  if (m && m[1]) return m[1];
+  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value, and
+  // some print two labelled codes.
+  //
+  // Two patterns, because the colon is only safe to make optional after a label
+  // that cannot be the start of another word. "SN" cannot: "SNID 12345678" would
+  // match SN and capture "ID". So bare SN still requires its colon.
+  var labelled = [];
+  var labelRes = [
+    /\b(?:s\/n|serial(?:\s*(?:no|number))?|service\s*tag)\b\s*[:=]?\s*([A-Za-z0-9-]+)/gi,
+    /\bsn\s*[:=]\s*([A-Za-z0-9-]+)/gi
+  ];
+  for (var r = 0; r < labelRes.length; r++) {
+    var m = labelRes[r].exec(s);
+    while (m) {
+      if (m[1]) labelled.push(m[1]);
+      m = labelRes[r].exec(s);
+    }
+  }
+  if (labelled.length) return byLongest(labelled);
 
-  return s;
+  // Nothing carries a label. If the scan is plainly two or more codes -- on
+  // separate lines, or spaces between them -- offer them longest first. Model
+  // and part numbers are dropped, for the same reason as above: an MTM like
+  // 83T60009US outruns the serial it sits next to.
+  function bareTokens(text) {
+    var tokens = text.split(/[\s,;|=:]+/);
+    var out = [];
+    for (var j = 0; j < tokens.length; j++) {
+      if (bareSerial(tokens[j])) out.push(tokens[j]);
+    }
+    return out;
+  }
+
+  var all = bareTokens(s);
+  if (all.length > 1) {
+    var kept = bareTokens(s.replace(
+      /\b(?:mtm|model|type|p\/?n|part(?:\s*(?:no|number))?|product|sku)\s*[:=]?\s*[A-Za-z0-9-]+/gi, ' '));
+    if (kept.length) return byLongest(kept);
+    return byLongest(all);
+  }
+
+  // One code, or none we recognise.
+  return [s];
 }
 
-function onDetected(data) {
-  data = serialFromScan(data);
+// The single best guess, for every caller that just wants a value. Same answer
+// serialFromScan has always given, now expressed as "the first candidate".
+function serialFromScan(raw) {
+  var list = serialCandidates(raw);
+  if (!list.length) return '';
+  return list[0];
+}
+
+// Which scan the outstanding roster lookup belongs to. A second scan while the
+// first is still in the air must not be overwritten by the older answer.
+var resolveSeq = 0;
+
+// Only a serial the sheet actually holds goes in the box. The code read off the
+// label is a guess until the S/N column confirms it, so nothing is filled until
+// the server answers -- a value in that box means "this is a real device", and
+// it should not sometimes mean "this is what the sticker said".
+//
+// The one exception is at the bottom: if the lookup cannot be done at all, the
+// guess goes in rather than leaving the teacher unable to file anything.
+function confirmAgainstRoster(raw, guess) {
+  var mine = ++resolveSeq;
+
+  // Never leave a teacher with no way forward. Scan again, type it, or -- if the
+  // label simply will not read -- tick the no-S/N box and file it on the room.
+  function askAgain(msg) {
+    setStatus(msg + ' Press Start camera to scan again, or type the S/N. ' +
+              'If you cannot read the label at all, tick “No S/N” below.', 'warn');
+  }
+
+  jsonp({ action: 'snResolve', sn: raw }).then(function (r) {
+    if (mine !== resolveSeq) return;      // a newer scan has taken over
+    if (notDevice()) return;              // box was hidden while we waited
+
+    if (r && r.ok && r.found && r.sn) {
+      var where = 'the roster';
+      if (r.cart) where = r.cart;
+      snField.value = r.sn;
+      if (r.sn.toUpperCase() !== guess.toUpperCase()) {
+        setStatus('✓ ' + r.sn + ' — found in ' + where +
+                  '. (The label also carried ' + guess + '.) Press Start camera to rescan.', 'ok');
+      } else {
+        setStatus('✓ ' + r.sn + ' — found in ' + where + '. Press Start camera to rescan.', 'ok');
+      }
+      return;
+    }
+
+    if (r && r.ok) {
+      // The books answered and do not have it. Leave the box empty: a serial
+      // that is not in the roster is more likely a misread than a new device,
+      // and a second look costs nothing.
+      if (r.ambiguous) {
+        askAgain('Scanned ' + guess + ', but it matched more than one device, so nothing was filled in.');
+      } else {
+        askAgain('Serial number ' + guess + ' was not found in the roster.');
+      }
+      return;
+    }
+
+    // The lookup itself failed. Fall back to the scanned guess rather than
+    // leave the form unusable, and say it was not checked.
+    snField.value = guess;
+    setStatus('Scanned ' + guess + ', but the roster could not be checked. ' +
+              'Make sure it matches the label before submitting.', 'warn');
+  }).catch(function () {
+    if (mine !== resolveSeq) return;
+    if (notDevice()) return;
+    snField.value = guess;                // offline or slow: better than nothing
+    setStatus('Scanned ' + guess + ', but the roster could not be reached. ' +
+              'Make sure it matches the label before submitting.', 'warn');
+  });
+}
+
+function onDetected(raw) {
+  var data = serialFromScan(raw);
   if (!data) return;
-  if (notDevice()) return;                // S/N box is hidden; nothing to fill
-  snField.value = data;
+  if (notDevice()) {                      // S/N box is hidden; nothing to fill.
+    // Say so. Returning in silence looks exactly like a broken scanner: the
+    // camera runs, the green box sits there, and nothing ever happens.
+    setStatus('“No S/N” is ticked, so there is no S/N box to fill. ' +
+              'Untick it to scan a device.', 'err');
+    return;
+  }
   beep();
   if (navigator.vibrate) { try { navigator.vibrate(120); } catch (e) {} }
   if (flashEl) { flashEl.classList.remove('on'); void flashEl.offsetWidth; flashEl.classList.add('on'); }
   if (reticleEl) { reticleEl.classList.add('hit'); setTimeout(function () { reticleEl.classList.remove('hit'); }, 350); }
   scanning = false;                       // one device per ticket; stop after a good read
-  setStatus('✓ Serial captured: ' + data + '  — press Start camera to rescan.', 'ok');
+  // Clear first: whatever is in the box is about to be replaced by a confirmed
+  // serial, or by nothing at all. Leaving a stale value under a "not found"
+  // warning is how the wrong device ends up on a ticket.
+  snField.value = '';
+  setStatus('Read ' + data + ' — checking the roster…');
+  confirmAgainstRoster(raw, data);
 }
 
 // ---- QR detection (native BarcodeDetector, else embedded jsQR; cropped+upscaled for small codes) ----
@@ -10429,12 +10582,31 @@ function grab(sx, sy, sw, sh, tw, th) {
   work.width = tw; work.height = th; wctx.imageSmoothingEnabled = true;
   wctx.drawImage(video, sx, sy, sw, sh, 0, 0, tw, th);
 }
+// jsQR reads every pixel we hand it, so the work canvas has to stay bounded.
+// A 1920x1080 camera upscaled 2x is 2304x1296 -- about 3 million pixels per
+// frame, roughly a second of work on a Chromebook, which looks like a scanner
+// that will not read anything. Cap the long edge; small cameras are still
+// upscaled, big ones just stop being wasteful.
+var MAX_WORK_EDGE = 1280;
+
+function fitWork(tw, th) {
+  var scale = Math.min(1, MAX_WORK_EDGE / Math.max(tw, th));
+  return [Math.max(1, Math.round(tw * scale)), Math.max(1, Math.round(th * scale))];
+}
+
 async function decodeWork() {
-  try {
-    if (detector) {
+  // The two decoders get their own try blocks on purpose. When they shared one,
+  // a BarcodeDetector that threw took jsQR down with it and the page silently
+  // stopped decoding anything at all.
+  if (detector) {
+    try {
       var codes = await detector.detect(work);
       if (codes && codes.length && codes[0].rawValue) return codes[0].rawValue;
+    } catch (e) {
+      detector = null;      // unusable on this device; stop asking, use jsQR
     }
+  }
+  try {
     var img = wctx.getImageData(0, 0, work.width, work.height);
     var res = window.jsQR(img.data, work.width, work.height, { inversionAttempts: 'attemptBoth' });
     if (res && res.data) return res.data;
@@ -10444,18 +10616,29 @@ async function decodeWork() {
 var frameCount = 0;
 async function tick() {
   if (!scanning) return;
-  if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    var w = video.videoWidth, h = video.videoHeight;
-    if (w && h) {
-      var hit = null;
-      var rw = w * 0.6, rh = h * 0.6, rx = (w - rw) / 2, ry = (h - rh) / 2;
-      grab(rx, ry, rw, rh, Math.round(rw * 2), Math.round(rh * 2));
-      hit = await decodeWork();
-      if (!hit && (frameCount++ & 1)) { grab(0, 0, w, h, w, h); hit = await decodeWork(); }
-      if (hit) onDetected(hit);
+  // One bad frame must not end the loop. This is an async function, so anything
+  // thrown in here becomes a rejected promise and the requestAnimationFrame at
+  // the bottom never runs -- the camera keeps showing video and the scanner is
+  // dead with nothing on screen to say so.
+  try {
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      var w = video.videoWidth, h = video.videoHeight;
+      if (w && h) {
+        var hit = null;
+        var rw = w * 0.6, rh = h * 0.6, rx = (w - rw) / 2, ry = (h - rh) / 2;
+        var size = fitWork(Math.round(rw * 2), Math.round(rh * 2));
+        grab(rx, ry, rw, rh, size[0], size[1]);
+        hit = await decodeWork();
+        if (!hit && (frameCount++ & 1)) {
+          size = fitWork(w, h);
+          grab(0, 0, w, h, size[0], size[1]);
+          hit = await decodeWork();
+        }
+        if (hit) onDetected(hit);
+      }
     }
-  }
-  requestAnimationFrame(tick);
+  } catch (e) {}
+  if (scanning) requestAnimationFrame(tick);
 }
 
 async function listCameras() {
@@ -10525,14 +10708,17 @@ function looksLikeSerial(sn) {
 }
 
 var CHECK_LABEL_MSG = 'Check the S/N printed on the device label — it is the longer code of ' +
-                      'letters and numbers, usually on the sticker underneath the Chromebook.';
+                      'letters and numbers, usually on the sticker underneath the Chromebook. ' +
+                      'If you cannot read it at all, tick “No S/N” and file the ticket on your room.';
 
-// ---- "This isn't about a Chromebook or iPad" ----------------------------------
-// There is no serial to give, so the S/N box is hidden outright and the teacher
-// and room come from "Your name" and "Room #", which are required either way.
-// Every check that assumes a serial is turned off: the shape test below, the
-// duplicate-ticket lookup and the inventory lookup. Issue type is forced to
-// Other, because none of the others describe anything but a Chromebook.
+// ---- The "No S/N" box ---------------------------------------------------------
+// Ticked either because it is not a Chromebook or iPad, or because the label
+// will not read. There is no serial to give, so the S/N box is hidden outright
+// and the teacher and room come from "Your name" and "Room #", which are
+// required either way. Every check that assumes a serial is turned off: the
+// shape test below, the duplicate-ticket lookup and the inventory lookup. Issue
+// type is forced to Other, because none of the others describe anything but a
+// Chromebook.
 //
 // The server does not take this on trust -- isDeviceTicket_ also rejects
 // anything that is not shaped like a serial -- but the flag records that it was
@@ -10550,27 +10736,43 @@ function teacherAndRoom() {
   return name || (room ? 'Rm ' + room : '');
 }
 
-if (notDeviceBox) {
-  notDeviceBox.addEventListener('change', function () {
-    var on = this.checked;
-    var sn = document.getElementById('fld_sn');
-    var issue = document.getElementById('fld_issue');
+// Put the form into the shape the checkbox calls for. `interactive` is true only
+// when the teacher just clicked the box -- that is the only time we are entitled
+// to wipe what is in the S/N field or move the cursor.
+//
+// This has to run on load as well as on change. Chrome restores a ticked
+// checkbox when the page is reloaded but does NOT fire `change` for it, so the
+// box came back ticked while the S/N field sat there visible and enabled, and
+// every scan was dropped by the notDevice() check in onDetected. The camera
+// worked, the QR code was read, and nothing happened.
+function syncNotDevice(interactive) {
+  var on = notDevice();
+  var sn = document.getElementById('fld_sn');
+  var issue = document.getElementById('fld_issue');
 
-    // A hidden field that is still required makes reportValidity() fail on a
-    // control it cannot scroll to, and the form silently refuses to submit.
-    sn.required = !on;
-    document.getElementById('snwrap').style.display = on ? 'none' : '';
+  // A hidden field that is still required makes reportValidity() fail on a
+  // control it cannot scroll to, and the form silently refuses to submit.
+  sn.required = !on;
+  document.getElementById('snwrap').style.display = on ? 'none' : '';
+
+  issue.disabled = false;
+  if (on) {
+    issue.value = 'Other';
+    issue.disabled = true;                   // .value still reads back when disabled
+  }
+  document.getElementById('notdevice_hint').style.display = on ? 'block' : 'none';
+
+  if (interactive) {
     sn.value = '';
-
-    if (on) {
-      issue.value = 'Other';
-      issue.disabled = true;                 // .value still reads back when disabled
-    } else {
-      issue.disabled = false;
-    }
-    document.getElementById('notdevice_hint').style.display = on ? 'block' : 'none';
     document.getElementById(on ? 'fld_name' : 'fld_sn').focus();
-  });
+  }
+}
+
+if (notDeviceBox) {
+  notDeviceBox.addEventListener('change', function () { syncNotDevice(true); });
+  syncNotDevice(false);
+  // Back-button restores from the bfcache with the old checkbox state too.
+  window.addEventListener('pageshow', function () { syncNotDevice(false); });
 }
 
 form.addEventListener('submit', function (e) {

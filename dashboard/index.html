@@ -12103,9 +12103,14 @@ function returnLoaner(row) {
 // -- the serial is the sn parameter, and mtm is the model, not a serial. Our
 // own printed labels encode the bare serial and pass through unchanged.
 // apps-script.gs has the same logic in serialFromScan_; keep them in step.
-function serialFromScan(raw) {
+// Every code a scan could plausibly be, longest first. A label often carries
+// two -- Acer prints a short SNID beside the serial, Lenovo an MTM -- and length
+// alone cannot always tell which is the device. The books can: whoever calls
+// this may check the candidates against the S/N column and use the one that is
+// really there, falling back to the first (longest) when the books cannot say.
+function serialCandidates(raw) {
   var s = String(raw == null ? '' : raw).trim();
-  if (!s) return '';
+  if (!s) return [];
 
   // Reads like a device serial on its own?
   function bareSerial(v) {
@@ -12115,9 +12120,24 @@ function serialFromScan(raw) {
     return /[A-Za-z]/.test(t) && /[0-9]/.test(t);
   }
 
+  // Longest first, duplicates dropped. Sort is stable, so codes of equal length
+  // stay in the order they were read.
+  function byLongest(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var v = String(list[i] == null ? '' : list[i]).trim();
+      if (v && out.indexOf(v) < 0) out.push(v);
+    }
+    out.sort(function (a, b) { return b.length - a.length; });
+    return out;
+  }
+
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
-    // A URL. Take the first query parameter that names a serial, so sn wins
-    // over mtm on a Lenovo link.
+    // A URL. Collect every query parameter that NAMES a serial. Selecting by
+    // name first is what keeps mtm out: it is the model, and on a Lenovo link it
+    // is longer than the serial beside it, so comparing lengths across the whole
+    // query string would pick the wrong one.
+    var found = [];
     var q = s.indexOf('?');
     if (q >= 0) {
       var parts = s.slice(q + 1).split(/[&;]/);
@@ -12133,22 +12153,70 @@ function serialFromScan(raw) {
         } catch (e) {
           val = parts[i].slice(eq + 1).trim();
         }
-        if (val) return val;
+        if (val) found.push(val);
       }
     }
+    if (found.length) return byLongest(found);
+
     // No serial parameter -- some makers put it in the last path segment.
     var path = s.split(/[?#]/)[0].replace(/\/+$/, '');
     var seg = path.slice(path.lastIndexOf('/') + 1);
-    if (bareSerial(seg)) return seg;
-    return s;             // nothing recognisable; keep what we read rather than
+    if (bareSerial(seg)) return [seg];
+    return [s];           // nothing recognisable; keep what we read rather than
                           // mangle it into something wrong
   }
 
-  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value.
-  var m = s.match(/\b(?:s\/n|sn|serial(?:\s*(?:no|number))?|service\s*tag)\s*[:=]\s*([A-Za-z0-9-]+)/i);
-  if (m && m[1]) return m[1];
+  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value, and
+  // some print two labelled codes.
+  //
+  // Two patterns, because the colon is only safe to make optional after a label
+  // that cannot be the start of another word. "SN" cannot: "SNID 12345678" would
+  // match SN and capture "ID". So bare SN still requires its colon.
+  var labelled = [];
+  var labelRes = [
+    /\b(?:s\/n|serial(?:\s*(?:no|number))?|service\s*tag)\b\s*[:=]?\s*([A-Za-z0-9-]+)/gi,
+    /\bsn\s*[:=]\s*([A-Za-z0-9-]+)/gi
+  ];
+  for (var r = 0; r < labelRes.length; r++) {
+    var m = labelRes[r].exec(s);
+    while (m) {
+      if (m[1]) labelled.push(m[1]);
+      m = labelRes[r].exec(s);
+    }
+  }
+  if (labelled.length) return byLongest(labelled);
 
-  return s;
+  // Nothing carries a label. If the scan is plainly two or more codes -- on
+  // separate lines, or spaces between them -- offer them longest first. Model
+  // and part numbers are dropped, for the same reason as above: an MTM like
+  // 83T60009US outruns the serial it sits next to.
+  function bareTokens(text) {
+    var tokens = text.split(/[\s,;|=:]+/);
+    var out = [];
+    for (var j = 0; j < tokens.length; j++) {
+      if (bareSerial(tokens[j])) out.push(tokens[j]);
+    }
+    return out;
+  }
+
+  var all = bareTokens(s);
+  if (all.length > 1) {
+    var kept = bareTokens(s.replace(
+      /\b(?:mtm|model|type|p\/?n|part(?:\s*(?:no|number))?|product|sku)\s*[:=]?\s*[A-Za-z0-9-]+/gi, ' '));
+    if (kept.length) return byLongest(kept);
+    return byLongest(all);
+  }
+
+  // One code, or none we recognise.
+  return [s];
+}
+
+// The single best guess, for every caller that just wants a value. Same answer
+// serialFromScan has always given, now expressed as "the first candidate".
+function serialFromScan(raw) {
+  var list = serialCandidates(raw);
+  if (!list.length) return '';
+  return list[0];
 }
 
 // Camera scan for the lookup box

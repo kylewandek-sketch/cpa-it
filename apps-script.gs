@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-08-11 validation + loaners + editor';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-08-12c roster-matched serials';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -197,6 +197,8 @@ function doGet(e) {
     out = todoShowGroup_(p);
   } else if (p.action === 'snCheck') {
     out = snCheck_(p);            // public: submit form checks the S/N before filing
+  } else if (p.action === 'snResolve') {
+    out = snResolve_(p);          // public: scanner asks the books which scanned code is the device
   } else if (p.action === 'openCount') {
     out = openCount_(p);          // public: duplicate-open-ticket check for the submit form
   } else {
@@ -321,9 +323,11 @@ function snCheck_(p) {
   var sn = serialFromScan_(p.sn);
   if (!sn) return { ok: true, found: false };
   try {
-    var hits = rosterFindRows_(sn);
-    if (!hits.length) return { ok: true, found: false };
-    return { ok: true, found: true, cart: rosterPickBest_(hits).sheet.getName() };
+    // Same matcher the scanner uses, so a serial that IS in the books under a
+    // slightly longer form stops being reported as missing at submit time.
+    var hit = rosterResolveOne_(sn);
+    if (!hit || hit.ambiguous) return { ok: true, found: false };
+    return { ok: true, found: true, sn: hit.sn, how: hit.how, cart: rosterCartFor_(hit.sn) };
   } catch (e) {
     return { ok: false, error: String(e) };   // the form treats an error as "do not block"
   }
@@ -2694,13 +2698,31 @@ function loanerOutNote_(student, inopSn, dateOut) {
   return text + ', replaces ' + inopSn + ', ' + loanerShortDate_(dateOut);
 }
 
+// A relocation carries no broken device, so the loaner wording is wrong for it:
+// it is not out to anyone in place of anything, it simply lives somewhere else
+// now. Saying so plainly also stops the note reading "replaces , 8/11".
+function loanerMovedNote_(source, dateOut) {
+  var from = String(source || '').trim();
+  var text = 'MOVED —';
+  if (from) text += ' from ' + from + ',';
+  return text + ' ' + loanerShortDate_(dateOut);
+}
+
+// The note that belongs on the device that went out, whichever kind of row this
+// is. Every caller goes through here -- the writer, the validator and the return
+// path -- so the three can never disagree about what a row's note should say.
+function loanerDeviceNote_(L) {
+  if (L.inopSn) return loanerOutNote_(L.student, L.inopSn, L.dateOut);
+  return loanerMovedNote_(L.source, L.dateOut);
+}
+
 // Only ever writes into a cell that is empty or already holds a loaner note.
 //
 // Anything else in that column was typed by a person, and a re-sync across a
 // ledger full of open loans would otherwise overwrite it with no undo behind it.
 // Refusing instead means re-sync cannot destroy anything: the worst case is a
 // note that does not get written, which the validator then reports.
-var LOANER_NOTE_RE = /^(INOP|LOANER)\s*[—-]/i;
+var LOANER_NOTE_RE = /^(INOP|LOANER|MOVED)\s*[—-]/i;
 
 function loanerNoteWrite_(sn, text) {
   try {
@@ -2892,7 +2914,7 @@ function loanerReturn_(p) {
   if (!target.open) return { ok: false, error: 'That loan was already returned.' };
 
   var c1 = loanerNoteClear_(target.inopSn, loanerInopNote_(target.loanerSn, target.dateOut, target.source));
-  var c2 = loanerNoteClear_(target.loanerSn, loanerOutNote_(target.student, target.inopSn, target.dateOut));
+  var c2 = loanerNoteClear_(target.loanerSn, loanerDeviceNote_(target));
   sh.getRange(target.row, 8).setValue(new Date());
 
   return { ok: true, row: target.row, cleared: (c1.cleared || 0) + (c2.cleared || 0) };
@@ -2914,17 +2936,22 @@ function loanerResync_() {
 
   for (var i = 0; i < loans.length; i++) {
     var L = loans[i];
+
     var inopNote = loanerInopNote_(L.loanerSn, L.dateOut, L.source);
-    var outNote = loanerOutNote_(L.student, L.inopSn, L.dateOut);
+    var outNote = loanerDeviceNote_(L);      // LOANER - ... or MOVED - ...
 
     if (L.open) {
       checked++;
-      var w1 = loanerNoteWrite_(L.inopSn, inopNote);
+      // The device that went out always gets a note. The INOP note only exists
+      // when there is a broken device to put it on, so relocations skip it.
       var w2 = loanerNoteWrite_(L.loanerSn, outNote);
-      if (w1.ok && !w1.skipped) written++;
       if (w2.ok && !w2.skipped) written++;
-      if (w1.skipped) skipped.push(L.inopSn + ' — ' + w1.skipped);
       if (w2.skipped) skipped.push(L.loanerSn + ' — ' + w2.skipped);
+      if (L.inopSn) {
+        var w1 = loanerNoteWrite_(L.inopSn, inopNote);
+        if (w1.ok && !w1.skipped) written++;
+        if (w1.skipped) skipped.push(L.inopSn + ' — ' + w1.skipped);
+      }
       continue;
     }
     if (!L.dateIn) continue;
@@ -3408,6 +3435,12 @@ function validateData_(p) {
       for (var tr = 0; tr < col.length; tr++) {
         var ts = String(col[tr][0] || '').trim().toUpperCase();
         if (!ts) continue;
+        // Not every ticket is about a device. A "not a Chromebook or iPad"
+        // ticket carries a teacher and room here, which is not a serial and must
+        // never be reported as one -- otherwise every projector ticket becomes a
+        // permanent warning. Anything not shaped like a serial is skipped; a
+        // mistyped serial still IS serial-shaped, so real typos still report.
+        if (!looksLikeRosterSerial_(ts)) continue;
         if (seenT[ts]) continue;
         seenT[ts] = true;
         if (A.byserial[ts] || C.byserial[ts]) continue;
@@ -3488,11 +3521,28 @@ function validateData_(p) {
                              at: { book: 'loaners', row: L.row } });
         }
 
-        // Does the note the ledger implies actually exist on the device?
-        var wantInop = loanerInopNote_(L.loanerSn, L.dateOut, L.source);
-        var wantOut = loanerOutNote_(L.student, L.inopSn, L.dateOut);
-        expected[wantInop] = true;
+        // The note this row implies on the device that went out. Registered as
+        // expected for EVERY open row, loan or relocation, so a relocation note
+        // sitting on a device is recognised rather than reported as an orphan.
+        // Kyle keeps those deliberately -- seeing where a device came from is
+        // useful on a cart tab.
+        var wantOut = loanerDeviceNote_(L);
         expected[wantOut] = true;
+
+        // A row with no Inop S/N is a relocation, not a loan: the device simply
+        // lives in another cart now, nothing is broken, and there is no pair to
+        // annotate. Its note is legitimate but not required, so nothing further
+        // is checked -- reporting a missing one would be 60 findings about
+        // devices that are exactly where they should be.
+        //
+        // Inop S/N is the field that separates the two, and it is the same test
+        // loanerResync_ uses before writing anything.
+        if (!L.inopSn) continue;
+
+        // A real loan: both notes are expected to be there, and their absence is
+        // drift worth reporting.
+        var wantInop = loanerInopNote_(L.loanerSn, L.dateOut, L.source);
+        expected[wantInop] = true;
 
         if (!found[wantInop]) {
           missingNote.push({ text: L.inopSn + '   row ' + L.row + '   expected: "' + wantInop + '"',
@@ -3577,6 +3627,17 @@ function validateFixSerials_() {
   }
 }
 
+// A ticket is about a Chromebook or iPad when its S/N column actually holds a
+// serial. With the help desk's "not a device" box ticked that column holds a
+// teacher name and room instead -- which looksLikeRosterSerial_ rejects, since
+// it has spaces in it -- so the shape of the value is a reliable test on its
+// own. The flag the form sends is honoured first, so stated intent wins over
+// anything inferred.
+function isDeviceTicket_(sn, nonDeviceFlag) {
+  if (String(nonDeviceFlag || '') === '1') return false;
+  return looksLikeRosterSerial_(sn);
+}
+
 // ---- Ticket submissions ----
 function doPost(e) {
   try {
@@ -3600,7 +3661,10 @@ function doPost(e) {
 
     var photoUrl = '';
     try {
-      photoUrl = savePhoto_(data.photo, 'CB_' + (data.sn || 'unknown') + '_ticket' + no + '.jpg');
+      // The S/N column can now hold "Messer · Rm 13" rather than a serial, so the
+      // filename is scrubbed of anything that does not belong in one.
+      var tag = String(data.sn || 'unknown').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      photoUrl = savePhoto_(data.photo, 'CB_' + (tag || 'unknown') + '_ticket' + no + '.jpg');
     } catch (e) {
       photoUrl = '';                        // never fail a ticket because of a photo
       Logger.log('photo save failed: ' + e); // shows in Executions log
@@ -3614,13 +3678,21 @@ function doPost(e) {
     ]);
 
     sendEmail_(data, now, no, photoUrl);
-    // put what was typed into "Describe the problem" on the device's row in the
-    // roster workbook; skipped silently if the serial is not on a tab
-    var note = rosterNoteWrite_(data.sn, no, data.description);
-    // put the same text on the to-do list, under the cart the device is in
-    var where = null;
-    if (note && note.tab) where = { cart: note.tab, cbNo: note.cbNo };
-    ticketTodoWrite_(data.sn, no, data.description, where);
+
+    // Everything below annotates a DEVICE. A ticket filed with the help desk's
+    // "not a Chromebook or iPad" box ticked has a teacher and room in the S/N
+    // column instead of a serial, so there is no device row to write a note on
+    // and no cart to group a to-do under. The To-Do page is the history of the
+    // Chromebooks and iPads; a projector does not belong in it.
+    if (isDeviceTicket_(data.sn, data.nonDevice)) {
+      // put what was typed into "Describe the problem" on the device's row in the
+      // roster workbook; skipped silently if the serial is not on a tab
+      var note = rosterNoteWrite_(data.sn, no, data.description);
+      // put the same text on the to-do list, under the cart the device is in
+      var where = null;
+      if (note && note.tab) where = { cart: note.tab, cbNo: note.cbNo };
+      ticketTodoWrite_(data.sn, no, data.description, where);
+    }
     return jsonOut_({ ok: true, ticketNo: no });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err) });
@@ -3668,13 +3740,33 @@ function jsonOut_(obj) {
 // build out of the Pages cache, would otherwise put a link in the sheet.
 // serialFromScan() in the three HTML files is the same logic -- keep them in
 // step if either changes.
-function serialFromScan_(raw) {
+// Every code a scan could plausibly be, longest first. A label often carries
+// two -- Acer prints a short SNID beside the serial, Lenovo an MTM -- and length
+// alone cannot always tell which is the device. The books can: whoever calls
+// this may check the candidates against the S/N column and use the one that is
+// really there, falling back to the first (longest) when the books cannot say.
+function serialCandidates_(raw) {
   var s = String(raw == null ? '' : raw).trim();
-  if (!s) return '';
+  if (!s) return [];
+
+  // Longest first, duplicates dropped. Sort is stable, so codes of equal length
+  // stay in the order they were read.
+  function byLongest(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var v = String(list[i] == null ? '' : list[i]).trim();
+      if (v && out.indexOf(v) < 0) out.push(v);
+    }
+    out.sort(function (a, b) { return b.length - a.length; });
+    return out;
+  }
 
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
-    // A URL. Take the first query parameter that names a serial, so sn wins
-    // over mtm on a Lenovo link.
+    // A URL. Collect every query parameter that NAMES a serial. Selecting by
+    // name first is what keeps mtm out: it is the model, and on a Lenovo link it
+    // is longer than the serial beside it, so comparing lengths across the whole
+    // query string would pick the wrong one.
+    var found = [];
     var q = s.indexOf('?');
     if (q >= 0) {
       var parts = s.slice(q + 1).split(/[&;]/);
@@ -3690,22 +3782,223 @@ function serialFromScan_(raw) {
         } catch (e) {
           val = parts[i].slice(eq + 1).trim();
         }
-        if (val) return val;
+        if (val) found.push(val);
       }
     }
+    if (found.length) return byLongest(found);
+
     // No serial parameter -- some makers put it in the last path segment.
     var path = s.split(/[?#]/)[0].replace(/\/+$/, '');
     var seg = path.slice(path.lastIndexOf('/') + 1);
-    if (looksLikeRosterSerial_(seg)) return seg;
-    return s;             // nothing recognisable; keep what we read rather than
+    if (looksLikeRosterSerial_(seg)) return [seg];
+    return [s];           // nothing recognisable; keep what we read rather than
                           // mangle it into something wrong
   }
 
-  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value.
-  var m = s.match(/\b(?:s\/n|sn|serial(?:\s*(?:no|number))?|service\s*tag)\s*[:=]\s*([A-Za-z0-9-]+)/i);
-  if (m && m[1]) return m[1];
+  // Not a URL. Some labels write "S/N: ABC123" rather than the bare value, and
+  // some print two labelled codes.
+  //
+  // Two patterns, because the colon is only safe to make optional after a label
+  // that cannot be the start of another word. "SN" cannot: "SNID 12345678" would
+  // match SN and capture "ID". So bare SN still requires its colon.
+  var labelled = [];
+  var labelRes = [
+    /\b(?:s\/n|serial(?:\s*(?:no|number))?|service\s*tag)\b\s*[:=]?\s*([A-Za-z0-9-]+)/gi,
+    /\bsn\s*[:=]\s*([A-Za-z0-9-]+)/gi
+  ];
+  for (var r = 0; r < labelRes.length; r++) {
+    var m = labelRes[r].exec(s);
+    while (m) {
+      if (m[1]) labelled.push(m[1]);
+      m = labelRes[r].exec(s);
+    }
+  }
+  if (labelled.length) return byLongest(labelled);
 
-  return s;
+  // Nothing carries a label. If the scan is plainly two or more codes -- on
+  // separate lines, or spaces between them -- offer them longest first. Model
+  // and part numbers are dropped, for the same reason as above: an MTM like
+  // 83T60009US outruns the serial it sits next to.
+  function bareTokens(text) {
+    var tokens = text.split(/[\s,;|=:]+/);
+    var out = [];
+    for (var j = 0; j < tokens.length; j++) {
+      if (looksLikeRosterSerial_(tokens[j])) out.push(tokens[j]);
+    }
+    return out;
+  }
+
+  var all = bareTokens(s);
+  if (all.length > 1) {
+    var kept = bareTokens(s.replace(
+      /\b(?:mtm|model|type|p\/?n|part(?:\s*(?:no|number))?|product|sku)\s*[:=]?\s*[A-Za-z0-9-]+/gi, ' '));
+    if (kept.length) return byLongest(kept);
+    return byLongest(all);
+  }
+
+  // One code, or none we recognise.
+  return [s];
+}
+
+// The single best guess, for every caller that just wants a value. Same answer
+// serialFromScan has always given, now expressed as "the first candidate".
+function serialFromScan_(raw) {
+  var list = serialCandidates_(raw);
+  if (!list.length) return '';
+  return list[0];
+}
+
+// ---- Lining a scanned code up with the S/N column ---------------------------
+// Exact whole-cell first, which is all the books ever needed. Only when that
+// misses do we line the two up by their TAILS: a factory QR often carries a
+// prefix the sheet never had, so scan and cell agree from some point onwards.
+// Matching on the tail rather than the head matters -- Chromebooks from one
+// purchase share a long prefix and differ at the end, so the head is exactly
+// the part that does not tell them apart.
+//
+// Eight characters is the floor: the shortest real serial in these books is
+// Lenovo's 8, and a shorter overlap starts colliding across 1,200-odd devices.
+// A tail that lands on two different devices is REFUSED, not guessed at --
+// hanging a ticket on the wrong Chromebook is worse than asking the teacher to
+// read the label again.
+var SERIAL_TAIL_MIN = 8;
+var SERIAL_INDEX_CACHE_KEY = 'serialTailIndex_v1';
+var serialIndexMemo_ = null;
+
+function serialTail_(sn) {
+  var s = String(sn || '').toUpperCase();
+  if (s.length < SERIAL_TAIL_MIN) return '';
+  return s.slice(-SERIAL_TAIL_MIN);
+}
+
+// { exact: {SERIAL: true}, tails: {TAIL: [SERIAL, ...]} } over the check
+// workbook's serial columns. Building it walks every roster tab, so it is
+// memoised per execution and cached for six hours. The exact path below never
+// builds it -- only a scan that misses outright pays for this.
+function serialIndex_() {
+  if (serialIndexMemo_) return serialIndexMemo_;
+  var cached = null;
+  try { cached = CacheService.getScriptCache().get(SERIAL_INDEX_CACHE_KEY); } catch (e) { cached = null; }
+  if (cached) {
+    try {
+      serialIndexMemo_ = JSON.parse(cached);
+      return serialIndexMemo_;
+    } catch (e) {}
+  }
+  var map = serialMap_(NOTE_BOOK_ID, false);
+  var idx = { exact: {}, tails: {} };
+  for (var sn in map.byserial) {
+    idx.exact[sn] = true;
+    var t = serialTail_(sn);
+    if (!t) continue;
+    if (!idx.tails[t]) idx.tails[t] = [];
+    if (idx.tails[t].indexOf(sn) < 0) idx.tails[t].push(sn);
+  }
+  try {
+    var json = JSON.stringify(idx);
+    if (json.length < 90000) CacheService.getScriptCache().put(SERIAL_INDEX_CACHE_KEY, json, 21600);
+  } catch (e) {}
+  serialIndexMemo_ = idx;
+  return idx;
+}
+
+// Throw the cached index away. Worth calling after anything that rewrites
+// serials in the books, so a scan is not matched against a stale list.
+function serialIndexReset_() {
+  serialIndexMemo_ = null;
+  try { CacheService.getScriptCache().remove(SERIAL_INDEX_CACHE_KEY); } catch (e) {}
+}
+
+// One scanned code -> the serial the books actually hold.
+// { sn: <serial>, how: 'exact'|'tail' }, or { ambiguous: true }, or null.
+function rosterResolveOne_(scan) {
+  var up = String(scan || '').trim().toUpperCase();
+  if (!up) return null;
+
+  // One optimised whole-cell search, no index built.
+  try {
+    if (rosterFindRows_(up).length) return { sn: up, how: 'exact' };
+  } catch (e) {
+    return null;                          // the caller treats an error as "do not block"
+  }
+
+  var tail = serialTail_(up);
+  if (!tail) return null;
+
+  var idx = serialIndex_();
+  if (idx.exact[up]) return { sn: up, how: 'exact' };
+
+  var list = idx.tails[tail] || [];
+  var hits = [];
+  for (var i = 0; i < list.length; i++) {
+    var cand = list[i];
+    // "Lining up" means one is the tail of the other, in either direction:
+    // the scan may carry a prefix the sheet lacks, or the reverse.
+    if (up.length >= cand.length) {
+      if (up.slice(up.length - cand.length) === cand) hits.push(cand);
+    } else {
+      if (cand.slice(cand.length - up.length) === up) hits.push(cand);
+    }
+  }
+  if (hits.length > 1) return { ambiguous: true };
+  if (hits.length === 1) {
+    // The index can be up to six hours old, so confirm the winner is still in
+    // the books before handing it back. New devices never need this -- they are
+    // found by the live search above -- but a serial that has since been
+    // removed or corrected would otherwise keep being matched from cache.
+    try {
+      if (!rosterFindRows_(hits[0]).length) {
+        serialIndexReset_();
+        return null;
+      }
+    } catch (e) {
+      return null;
+    }
+    return { sn: hits[0], how: 'tail' };
+  }
+  return null;
+}
+
+function rosterCartFor_(sn) {
+  try {
+    var hits = rosterFindRows_(sn);
+    if (!hits.length) return '';
+    return rosterPickBest_(hits).sheet.getName();
+  } catch (e) { return ''; }
+}
+
+// Public (no token). Takes the RAW scan, not a serial: the server derives the
+// candidates itself so the page and the script cannot drift apart on which
+// codes a label offers.
+//
+// The books decide. Length only breaks a tie they cannot: when two of the
+// scanned codes are both real devices, or when none of them are.
+function snResolve_(p) {
+  var raw = String(p.sn == null ? '' : p.sn);
+  var list = serialCandidates_(raw);
+  if (!list.length) return { ok: true, found: false, sn: '' };
+
+  var ambiguous = false;
+  var found = [];
+  for (var i = 0; i < list.length; i++) {
+    var hit = rosterResolveOne_(list[i]);
+    if (!hit) continue;
+    if (hit.ambiguous) { ambiguous = true; continue; }
+    found.push(hit);
+  }
+
+  if (found.length) {
+    // `list` came in longest first and `found` kept that order, so found[0] is
+    // the longest of the codes that are genuinely in the books.
+    var how = found[0].how;
+    if (found.length > 1) how = 'longest';
+    return { ok: true, found: true, sn: found[0].sn, how: how,
+             cart: rosterCartFor_(found[0].sn), candidates: list.length };
+  }
+
+  // Nothing matched. Hand back the same guess as before so the form still has a
+  // value to work with, and say why it is only a guess.
+  return { ok: true, found: false, sn: list[0], ambiguous: ambiguous, candidates: list.length };
 }
 
 // ---- One-off cleanup of what is already stored ------------------------------
