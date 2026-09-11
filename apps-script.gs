@@ -1,4 +1,4 @@
-var SCRIPT_VERSION = '2026-08-12c roster-matched serials';   // shown by checkSetup()
+var SCRIPT_VERSION = '2026-09-11b notes ride in status emails';   // shown by checkSetup()
 
 var HELPDESK_EMAIL = 'kyle.anderson@cpaohio.org';
 var ADMIN_TOKEN = 'CHANGE_ME';   // set your own; do NOT commit the real token to a public repo
@@ -273,11 +273,25 @@ function updateTicket_(p) {
   var sheet = firstSheet_();
   ensureHeaders_(sheet);
   var oldStatus = sheet.getRange(row, 9).getValue();
+
+  // Notes are saved first, so a status email sent by this same request already
+  // includes the note.
+  var firstNote = false;
+  if (p.notes != null) {
+    var oldNotes = String(sheet.getRange(row, 10).getValue() || '').trim();
+    sheet.getRange(row, 10).setValue(p.notes);
+    if (oldNotes === '' && String(p.notes).trim() !== '') firstNote = true;
+  }
+
+  var statusEmailSent = false;
   if (p.status != null) {
     sheet.getRange(row, 9).setValue(p.status);
     if (p.status !== oldStatus) {
       if (p.status === 'Resolved') sheet.getRange(row, 14).setValue(new Date());
-      if (p.status === 'In Progress' || p.status === 'Resolved') sendStatusEmail_(sheet, row, p.status);
+      if (p.status === 'In Progress' || p.status === 'Resolved') {
+        sendStatusEmail_(sheet, row, p.status);
+        statusEmailSent = true;
+      }
       // roster note: put the description in the device's row while it is being
       // worked on, take it back out once the ticket is closed
       var r = sheet.getRange(row, 1, 1, HEADERS.length).getValues()[0];
@@ -291,7 +305,23 @@ function updateTicket_(p) {
       }
     }
   }
-  if (p.notes != null) sheet.getRange(row, 10).setValue(p.notes);
+  // Notes normally travel inside the status email (sendStatusEmail_ adds them
+  // whenever the field has a value), so a status change and a note never arrive
+  // as two emails. A note gets an email of its own in one case only: it is the
+  // FIRST note on the ticket, and the ticket is already past New. Editing an
+  // existing note sends nothing; the change goes out with the next status email.
+  if (firstNote && !statusEmailSent) {
+    var curStatus = String(sheet.getRange(row, 9).getValue() || '').trim();
+    if (curStatus !== '' && curStatus !== 'New') {
+      try {
+        sendNoteEmail_(sheet, row);
+      } catch (e) {
+        // The note is already saved. A mail quota or address problem must not
+        // make the dashboard report the save as failed.
+        Logger.log('note email failed for row ' + row + ': ' + e);
+      }
+    }
+  }
   if (p.studentAtFault != null) sheet.getRange(row, 12).setValue(p.studentAtFault);
   if (p.assignedTo != null) sheet.getRange(row, 13).setValue(p.assignedTo);
   return { ok: true };
@@ -303,17 +333,68 @@ function sendStatusEmail_(sheet, row, status) {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return;
   var no = r[10] || '';
   var subject = '[Help Desk] Ticket #' + no + ' — ' + status + ' — CB ' + r[0];
+
+  // The IT note, when there is one. No note, no section.
+  var notes = String(r[9] || '').trim();
+  var notesBlock = '';
+  if (notes !== '') notesBlock = 'IT notes:\n' + notes + '\n\n';
+
   var body = 'Your Chromebook help desk ticket is now: ' + status + '.\n\n' +
     'Ticket #:       ' + no + '\n' +
     'Chromebook S/N: ' + r[0] + '\n' +
     'Issue:          ' + r[5] + '\n\n' +
     'Description:\n' + (r[7] || '(none given)') + '\n\n' +
-    (r[9] ? 'IT notes:\n' + r[9] + '\n\n' : '') +
+    notesBlock +
     (status === 'Resolved'
       ? 'This ticket has been marked resolved. Reply if the problem is not fixed.\n'
       : 'We are working on it and will follow up.\n') +
     '\n' + HELPDESK_EMAIL;
-  MailApp.sendEmail(email, subject, body, { name: 'CPA IT Tickets', replyTo: HELPDESK_EMAIL });
+
+  // A status email carrying a note copies the help desk, the same as a note
+  // email does, so Kyle still sees every note that goes to a teacher.
+  var options = { name: 'CPA IT Tickets', replyTo: HELPDESK_EMAIL };
+  if (notes !== '' && String(email).toLowerCase() !== HELPDESK_EMAIL.toLowerCase()) {
+    options.cc = HELPDESK_EMAIL;
+  }
+  MailApp.sendEmail(email, subject, body, options);
+}
+
+// A note typed on the dashboard goes to the teacher on the ticket, with the help
+// desk copied. The teacher is the To and replies go to the help desk, the same
+// as every other ticket email.
+//
+// No usable teacher address (blank, or a non-device ticket filed without one):
+// the help desk still gets it. A teacher address that IS the help desk is not
+// copied to itself.
+function sendNoteEmail_(sheet, row) {
+  var r = sheet.getRange(row, 1, 1, HEADERS.length).getValues()[0];
+  var no = r[10] || '';
+  var status = String(r[8] || '').trim();
+  if (!status) status = 'New';
+
+  var subject = '[Help Desk] Ticket #' + no + ' — IT note — CB ' + r[0];
+  var body = 'IT added a note to your help desk ticket.\n\n' +
+    'Ticket #:       ' + no + '\n' +
+    'Chromebook S/N: ' + r[0] + '\n' +
+    'Issue:          ' + r[5] + '\n' +
+    'Status:         ' + status + '\n\n' +
+    'IT note:\n' + String(r[9] || '').trim() + '\n\n' +
+    'Description:\n' + (r[7] || '(none given)') + '\n\n' +
+    'Reply to this email if you have questions.\n' +
+    '\n' + HELPDESK_EMAIL;
+
+  var teacher = String(r[2] || '').trim();
+  var valid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(teacher);
+  var options = { name: 'CPA IT Tickets', replyTo: HELPDESK_EMAIL };
+
+  if (!valid) {
+    MailApp.sendEmail(HELPDESK_EMAIL, subject, body, options);
+    return;
+  }
+  if (teacher.toLowerCase() !== HELPDESK_EMAIL.toLowerCase()) {
+    options.cc = HELPDESK_EMAIL;
+  }
+  MailApp.sendEmail(teacher, subject, body, options);
 }
 
 // Is this serial in the roster at all? The submit form asks before filing a
@@ -2234,6 +2315,22 @@ function photoFolder_() {
 }
 
 // ---- Monthly archive ----
+// Only RESOLVED tickets are archived. New, In Progress and Waiting tickets stay on
+// the live sheet however old they are -- they are still being worked on.
+//
+// Until 2026-09-11 this copied every row and then cleared the whole sheet, so the
+// monthly run swept open tickets off the dashboard along with the closed ones.
+// restoreOpenTicketsFromArchive() below puts back what those runs took.
+var ARCHIVE_TAB_RE = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\d{2}_Tickets(_\d+)?$/;
+
+function isResolvedStatus_(status) {
+  return String(status || '').trim().toLowerCase() === 'resolved';
+}
+
+function isBlankTicketRow_(r) {
+  return String(r[0] || '').trim() === '' && String(r[10] || '').trim() === '';
+}
+
 function setupMonthlyArchive() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'archiveMonthly') ScriptApp.deleteTrigger(t);
@@ -2247,17 +2344,199 @@ function archiveCopy_(clear) {
   var lastRow = src.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'No tickets to archive.' };
   var lastCol = Math.max(HEADERS.length, src.getLastColumn());
+  var all = src.getRange(1, 1, lastRow, lastCol).getValues();
+
+  // The resolved rows, and where each one sits on the live sheet.
+  var resolved = [];
+  var resolvedRows = [];
+  var kept = 0;
+  for (var i = 1; i < all.length; i++) {
+    if (isBlankTicketRow_(all[i])) continue;
+    if (isResolvedStatus_(all[i][8])) {
+      resolved.push(all[i]);
+      resolvedRows.push(i + 1);
+    } else {
+      kept++;
+    }
+  }
+  if (!resolved.length) {
+    return { ok: true, name: '', rows: 0, kept: kept, cleared: false,
+             msg: 'No resolved tickets to archive.' };
+  }
+
   var prev = new Date();
   prev = new Date(prev.getFullYear(), prev.getMonth() - 1, 1);
   var name = MONTHS[prev.getMonth()] + String(prev.getFullYear()).slice(-2) + '_Tickets';
   if (ss.getSheetByName(name)) name += '_' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'MMddHHmm');
   var dest = ss.insertSheet(name, ss.getNumSheets());
-  var all = src.getRange(1, 1, lastRow, lastCol).getValues();
-  dest.getRange(1, 1, all.length, lastCol).setValues(all);
+  dest.getRange(1, 1, 1, lastCol).setValues([all[0]]);
+  dest.getRange(2, 1, resolved.length, lastCol).setValues(resolved);
   dest.getRange(1, 1, 1, lastCol).setFontWeight('bold');
   dest.setFrozenRows(1);
-  if (clear) src.getRange(2, 1, lastRow - 1, lastCol).clearContent();
-  return { ok: true, name: name, rows: lastRow - 1, cleared: !!clear };
+
+  if (clear) {
+    // Sheets refuses to delete the last row under a frozen header. If every row
+    // is going, add a spare empty one at the bottom first.
+    if (src.getMaxRows() - resolvedRows.length <= src.getFrozenRows()) {
+      src.insertRowAfter(src.getMaxRows());
+    }
+    // Deleted bottom-up, so removing a row never shifts one still waiting to be
+    // removed. Deleting rather than rewriting the sheet also leaves alone any
+    // ticket submitted while this runs -- it is appended below these rows.
+    for (var d = resolvedRows.length - 1; d >= 0; d--) {
+      src.deleteRow(resolvedRows[d]);
+    }
+  }
+  return { ok: true, name: name, rows: resolved.length, kept: kept, cleared: clear === true };
+}
+
+// ---- Undo for the old archive ------------------------------------------------
+// Run from the editor, in this order:
+//   1. listWronglyArchivedTickets()      reports, changes nothing
+//   2. restoreOpenTicketsFromArchive()   moves them back
+//
+// Every archive tab is checked, not just last month's. The dashboard's "Run test
+// archive" button used the same old code, so its tabs hold copies of tickets that
+// were open at the time too.
+//
+// "Moves back" is both halves: each open ticket is added to the live sheet AND
+// deleted from the archive tab. A copy left behind would be counted twice in the
+// lifetime stats and shown twice in a device lookup, since both read every tab.
+//
+// Tickets are matched on ticket number. An archived open ticket whose number is
+// already on the live sheet -- or that was already restored from a newer archive
+// tab -- is only removed from the archive, never copied again. That also makes
+// running the restore a second time harmless.
+function ticketKey_(r) {
+  var no = String(r[10] || '').trim();
+  if (no) return 'no:' + no;
+  var when = r[1];
+  if (Object.prototype.toString.call(when) === '[object Date]') when = when.toISOString();
+  return 'sn:' + String(r[0] || '').trim().toUpperCase() + '|' + String(when || '');
+}
+
+function wronglyArchived_() {
+  var ss = ticketBook_();
+  var live = firstSheet_();
+
+  var onLive = {};
+  var liveLast = live.getLastRow();
+  if (liveLast > 1) {
+    var liveVals = live.getRange(2, 1, liveLast - 1, HEADERS.length).getValues();
+    for (var i = 0; i < liveVals.length; i++) {
+      if (isBlankTicketRow_(liveVals[i])) continue;
+      onLive[ticketKey_(liveVals[i])] = true;
+    }
+  }
+
+  // Newest archive tab first, so the most recent copy of a ticket is the one
+  // restored. insertSheet puts each archive at the end of the tab strip.
+  var tabs = ss.getSheets();
+  var restoring = {};
+  var found = [];
+  for (var t = tabs.length - 1; t >= 0; t--) {
+    var sh = tabs[t];
+    var name = sh.getName();
+    if (!ARCHIVE_TAB_RE.test(name)) continue;
+    if (sh.getSheetId() === live.getSheetId()) continue;
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) continue;
+    var vals = sh.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
+    for (var r = 0; r < vals.length; r++) {
+      var row = vals[r];
+      if (isBlankTicketRow_(row)) continue;
+      if (isResolvedStatus_(row[8])) continue;        // belongs in the archive
+
+      var status = String(row[8] || '').trim();
+      if (!status) status = 'New';
+      var key = ticketKey_(row);
+      var action = 'restore';
+      if (onLive[key]) {
+        action = 'already on the live sheet';
+      } else if (restoring[key]) {
+        action = 'older copy of one being restored';
+      } else {
+        restoring[key] = true;
+      }
+      found.push({ tab: name, row: r + 2, ticketNo: String(row[10] || ''),
+                   sn: String(row[0] || ''), status: status, action: action,
+                   values: row });
+    }
+  }
+  return found;
+}
+
+function listWronglyArchivedTickets() {
+  var found = wronglyArchived_();
+  if (!found.length) {
+    Logger.log('nothing to restore -- every archived ticket is resolved');
+    return 0;
+  }
+  var restore = 0;
+  for (var i = 0; i < found.length; i++) {
+    var f = found[i];
+    if (f.action === 'restore') restore++;
+    Logger.log('  ' + f.tab + ' row ' + f.row + ':  #' + f.ticketNo + '  ' + f.status +
+               '  ' + f.sn + '   -> ' + f.action);
+  }
+  Logger.log('');
+  Logger.log(found.length + ' open ticket row(s) in archive tabs: ' + restore +
+             ' will go back on the live sheet, and all ' + found.length +
+             ' will be removed from their archive tabs.');
+  Logger.log('run restoreOpenTicketsFromArchive() to apply');
+  return found.length;
+}
+
+function restoreOpenTicketsFromArchive() {
+  var found = wronglyArchived_();
+  if (!found.length) {
+    Logger.log('nothing to restore -- every archived ticket is resolved');
+    return 0;
+  }
+  var ss = ticketBook_();
+  var live = firstSheet_();
+  ensureHeaders_(live);
+
+  // 1. Copy onto the live sheet first, oldest ticket first. If this run dies
+  //    before step 2, the worst case is a duplicate, which a second run removes.
+  var rows = [];
+  for (var i = 0; i < found.length; i++) {
+    if (found[i].action === 'restore') rows.push(found[i].values);
+  }
+  rows.sort(function (a, b) {
+    return new Date(a[1]).getTime() - new Date(b[1]).getTime();
+  });
+  if (rows.length) {
+    live.getRange(live.getLastRow() + 1, 1, rows.length, HEADERS.length).setValues(rows);
+    SpreadsheetApp.flush();
+  }
+
+  // 2. Take every open row out of the archive tabs, bottom-up per tab.
+  var byTab = {};
+  for (var j = 0; j < found.length; j++) {
+    if (!byTab[found[j].tab]) byTab[found[j].tab] = [];
+    byTab[found[j].tab].push(found[j].row);
+  }
+  var removed = 0;
+  for (var tab in byTab) {
+    var sh = ss.getSheetByName(tab);
+    var list = byTab[tab];
+    list.sort(function (a, b) { return b - a; });
+    // Same rule as the archive: never delete the last row under the header.
+    if (sh.getMaxRows() - list.length <= sh.getFrozenRows()) {
+      sh.insertRowAfter(sh.getMaxRows());
+    }
+    for (var k = 0; k < list.length; k++) {
+      sh.deleteRow(list[k]);
+      removed++;
+    }
+  }
+
+  Logger.log(rows.length + ' ticket(s) restored to "' + live.getName() + '", ' +
+             removed + ' row(s) removed from archive tabs');
+  Logger.log('reload the dashboard; press Refresh on the To-Do tab once so any to-do ' +
+             'duplicates made while these were archived are dropped');
+  return rows.length;
 }
 
 // ---- Sheet editor -----------------------------------------------------------
@@ -3852,17 +4131,25 @@ function serialFromScan_(raw) {
 // Exact whole-cell first, which is all the books ever needed. Only when that
 // misses do we line the two up by their TAILS: a factory QR often carries a
 // prefix the sheet never had, so scan and cell agree from some point onwards.
-// Matching on the tail rather than the head matters -- Chromebooks from one
-// purchase share a long prefix and differ at the end, so the head is exactly
-// the part that does not tell them apart.
+//
+// Then, only if the tail misses too, by their HEADS. Both ends are needed
+// because the two makers put the shared part at opposite ends:
+//   Acer   NXHBNAA00191610CC77600 -- 201 devices share the head NXHBNAA0,
+//          so the head says nothing and the tail is what identifies it.
+//   Lenovo YX0JKFYC + YXN0B620501L -- the sheet holds the 8-character label
+//          serial JOINED to a batch code, and that batch code repeats across
+//          the whole purchase. Here it is the HEAD that identifies the device,
+//          and a teacher scanning the label gets exactly that head. Tail-only
+//          matching is why those scans came back "not found".
 //
 // Eight characters is the floor: the shortest real serial in these books is
 // Lenovo's 8, and a shorter overlap starts colliding across 1,200-odd devices.
-// A tail that lands on two different devices is REFUSED, not guessed at --
+// An overlap that lands on two different devices is REFUSED, not guessed at --
 // hanging a ticket on the wrong Chromebook is worse than asking the teacher to
-// read the label again.
+// read the label again. That refusal is what makes the head pass safe: the
+// Acer heads collide, so they are thrown out rather than picked between.
 var SERIAL_TAIL_MIN = 8;
-var SERIAL_INDEX_CACHE_KEY = 'serialTailIndex_v1';
+var SERIAL_INDEX_CACHE_KEY = 'serialTailIndex_v2';   // v2: heads added
 var serialIndexMemo_ = null;
 
 function serialTail_(sn) {
@@ -3871,10 +4158,16 @@ function serialTail_(sn) {
   return s.slice(-SERIAL_TAIL_MIN);
 }
 
-// { exact: {SERIAL: true}, tails: {TAIL: [SERIAL, ...]} } over the check
-// workbook's serial columns. Building it walks every roster tab, so it is
-// memoised per execution and cached for six hours. The exact path below never
-// builds it -- only a scan that misses outright pays for this.
+function serialHead_(sn) {
+  var s = String(sn || '').toUpperCase();
+  if (s.length < SERIAL_TAIL_MIN) return '';
+  return s.slice(0, SERIAL_TAIL_MIN);
+}
+
+// { exact: {SERIAL: true}, tails: {TAIL: [SERIAL, ...]}, heads: {HEAD: [SERIAL, ...]} }
+// over the check workbook's serial columns. Building it walks every roster tab,
+// so it is memoised per execution and cached for six hours. The exact path
+// below never builds it -- only a scan that misses outright pays for this.
 function serialIndex_() {
   if (serialIndexMemo_) return serialIndexMemo_;
   var cached = null;
@@ -3886,13 +4179,16 @@ function serialIndex_() {
     } catch (e) {}
   }
   var map = serialMap_(NOTE_BOOK_ID, false);
-  var idx = { exact: {}, tails: {} };
+  var idx = { exact: {}, tails: {}, heads: {} };
   for (var sn in map.byserial) {
     idx.exact[sn] = true;
     var t = serialTail_(sn);
     if (!t) continue;
     if (!idx.tails[t]) idx.tails[t] = [];
     if (idx.tails[t].indexOf(sn) < 0) idx.tails[t].push(sn);
+    var h = serialHead_(sn);
+    if (!idx.heads[h]) idx.heads[h] = [];
+    if (idx.heads[h].indexOf(sn) < 0) idx.heads[h].push(sn);
   }
   try {
     var json = JSON.stringify(idx);
@@ -3909,8 +4205,31 @@ function serialIndexReset_() {
   try { CacheService.getScriptCache().remove(SERIAL_INDEX_CACHE_KEY); } catch (e) {}
 }
 
+// Do the two codes line up at their ends, in either direction? The scan may
+// carry a part the sheet lacks, or the sheet may carry a part the label does
+// not print. atHead false compares the last characters, true the first.
+function serialOverlaps_(scan, cand, atHead) {
+  var shorter = scan;
+  var longer = cand;
+  if (scan.length >= cand.length) {
+    shorter = cand;
+    longer = scan;
+  }
+  if (atHead) return longer.slice(0, shorter.length) === shorter;
+  return longer.slice(longer.length - shorter.length) === shorter;
+}
+
+// Every roster serial this scan could be. Ambiguity is settled by the caller.
+function rosterOverlapHits_(up, list, atHead) {
+  var hits = [];
+  for (var i = 0; i < list.length; i++) {
+    if (serialOverlaps_(up, list[i], atHead)) hits.push(list[i]);
+  }
+  return hits;
+}
+
 // One scanned code -> the serial the books actually hold.
-// { sn: <serial>, how: 'exact'|'tail' }, or { ambiguous: true }, or null.
+// { sn: <serial>, how: 'exact'|'tail'|'head' }, or { ambiguous: true }, or null.
 function rosterResolveOne_(scan) {
   var up = String(scan || '').trim().toUpperCase();
   if (!up) return null;
@@ -3928,18 +4247,16 @@ function rosterResolveOne_(scan) {
   var idx = serialIndex_();
   if (idx.exact[up]) return { sn: up, how: 'exact' };
 
-  var list = idx.tails[tail] || [];
-  var hits = [];
-  for (var i = 0; i < list.length; i++) {
-    var cand = list[i];
-    // "Lining up" means one is the tail of the other, in either direction:
-    // the scan may carry a prefix the sheet lacks, or the reverse.
-    if (up.length >= cand.length) {
-      if (up.slice(up.length - cand.length) === cand) hits.push(cand);
-    } else {
-      if (cand.slice(cand.length - up.length) === up) hits.push(cand);
-    }
+  // Tail first, head only if the tail found nothing. Order matters: a Lenovo
+  // scan can reach both maps, and the tail is the end the older books were
+  // matched on, so nothing that used to resolve resolves differently now.
+  var how = 'tail';
+  var hits = rosterOverlapHits_(up, idx.tails[tail] || [], false);
+  if (!hits.length) {
+    how = 'head';
+    hits = rosterOverlapHits_(up, idx.heads[serialHead_(up)] || [], true);
   }
+
   if (hits.length > 1) return { ambiguous: true };
   if (hits.length === 1) {
     // The index can be up to six hours old, so confirm the winner is still in
@@ -3954,7 +4271,7 @@ function rosterResolveOne_(scan) {
     } catch (e) {
       return null;
     }
-    return { sn: hits[0], how: 'tail' };
+    return { sn: hits[0], how: how };
   }
   return null;
 }
