@@ -10488,6 +10488,16 @@ function serialFromScan(raw) {
 // first is still in the air must not be overwritten by the older answer.
 var resolveSeq = 0;
 
+// The serial in the box, if the books have already vouched for it. Submit used
+// to ask them the same question a second time, so one bad scan produced two
+// warnings -- the amber line here and a dialog on the way out -- and read as
+// two separate problems. Cleared by a new scan and by any typing, because both
+// mean the box no longer holds what was confirmed.
+var rosterConfirmedSn = '';
+if (snField) {
+  snField.addEventListener('input', function () { rosterConfirmedSn = ''; });
+}
+
 // Only a serial the sheet actually holds goes in the box. The code read off the
 // label is a guess until the S/N column confirms it, so nothing is filled until
 // the server answers -- a value in that box means "this is a real device", and
@@ -10497,12 +10507,13 @@ var resolveSeq = 0;
 // guess goes in rather than leaving the teacher unable to file anything.
 function confirmAgainstRoster(raw, guess) {
   var mine = ++resolveSeq;
+  rosterConfirmedSn = '';                 // this scan has not been vouched for yet
 
-  // Never leave a teacher with no way forward. Scan again, type it, or -- if the
-  // label simply will not read -- tick the no-S/N box and file it on the room.
+  // Never leave a teacher with no way forward -- but say it in one line. The
+  // three-sentence version wrapped to four lines of amber and buried the one
+  // thing worth reading, which is the serial it is talking about.
   function askAgain(msg) {
-    setStatus(msg + ' Press Start camera to scan again, or type the S/N. ' +
-              'If you cannot read the label at all, tick “No S/N” below.', 'warn');
+    setStatus(msg + ' Scan again, type it, or tick “No S/N”.', 'warn');
   }
 
   jsonp({ action: 'snResolve', sn: raw }).then(function (r) {
@@ -10513,9 +10524,14 @@ function confirmAgainstRoster(raw, guess) {
       var where = 'the roster';
       if (r.cart) where = r.cart;
       snField.value = r.sn;
+      rosterConfirmedSn = r.sn.toUpperCase();
       if (r.sn.toUpperCase() !== guess.toUpperCase()) {
+        // The books hold a longer serial than the label prints -- every Lenovo
+        // is stored as its 8-character label code joined to a batch code. Say
+        // what was read and what it is filed as, rather than implying the
+        // teacher scanned the wrong one of two codes.
         setStatus('✓ ' + r.sn + ' — found in ' + where +
-                  '. (The label also carried ' + guess + '.) Press Start camera to rescan.', 'ok');
+                  '. (Scanned ' + guess + '.) Press Start camera to rescan.', 'ok');
       } else {
         setStatus('✓ ' + r.sn + ' — found in ' + where + '. Press Start camera to rescan.', 'ok');
       }
@@ -10527,9 +10543,9 @@ function confirmAgainstRoster(raw, guess) {
       // that is not in the roster is more likely a misread than a new device,
       // and a second look costs nothing.
       if (r.ambiguous) {
-        askAgain('Scanned ' + guess + ', but it matched more than one device, so nothing was filled in.');
+        askAgain(guess + ' matches more than one device.');
       } else {
-        askAgain('Serial number ' + guess + ' was not found in the roster.');
+        askAgain(guess + ' isn’t in the inventory.');
       }
       return;
     }
@@ -10707,9 +10723,8 @@ function looksLikeSerial(sn) {
   return true;
 }
 
-var CHECK_LABEL_MSG = 'Check the S/N printed on the device label — it is the longer code of ' +
-                      'letters and numbers, usually on the sticker underneath the Chromebook. ' +
-                      'If you cannot read it at all, tick “No S/N” and file the ticket on your room.';
+var CHECK_LABEL_MSG = 'Check the longer code on the sticker underneath the Chromebook. ' +
+                      'If you cannot read it, tick “No S/N”.';
 
 // ---- The "No S/N" box ---------------------------------------------------------
 // Ticked either because it is not a Chromebook or iPad, or because the label
@@ -10823,6 +10838,10 @@ form.addEventListener('submit', function (e) {
                    '). Submit another anyway?')) return 'cancel';
     }
     // Is the serial actually on the roster? A typo can still look like a serial.
+    // Skipped when the scan already asked and the box still holds that answer:
+    // the books can only agree with themselves, and asking twice meant the
+    // teacher was warned about the same serial twice for one mistake.
+    if (payload.sn.toUpperCase() === rosterConfirmedSn) return 'go';
     formmsg.textContent = 'Checking the serial against inventory…';
     return jsonp({ action: 'snCheck', sn: payload.sn }).then(function (chk) {
       if (chk && chk.ok && chk.found === false) {
